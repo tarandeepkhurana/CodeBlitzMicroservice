@@ -2,19 +2,23 @@
 Question-related API endpoints.
 
 Endpoints:
-- POST /api/v1/questions/for-match - Get question for a match
+- POST /api/v1/questions/for-match - Trigger async variant generation (fire-and-forget)
+- GET /api/v1/questions/variant-status/{queue_id} - Check generation status
 - POST /api/v1/questions/execute - Execute user code against test cases
 - POST /api/v1/questions/test-piston - Direct PISTON test (no DB)
 """
 
 import logging
+import asyncio
 from typing import Literal
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 from app.schemas.api import (
     MatchQuestionRequest,
     MatchQuestionResponse,
+    AsyncGenerationResponse,
+    VariantStatusResponse,
     ExecuteCodeRequest,
     ExecuteCodeResponse,
     TestResult
@@ -84,144 +88,171 @@ async def test_piston_direct(request: DirectTestRequest) -> DirectTestResponse:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Get Question for Match (Steps 1-9 from workflow)
+# Async Variant Generation (fire-and-forget pattern)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/for-match", response_model=MatchQuestionResponse)
-async def get_question_for_match(request: MatchQuestionRequest) -> MatchQuestionResponse:
+async def _generate_variant_background(
+    queue_id: str,
+    match_id: str,
+    user1_id: str,
+    user2_id: str,
+    user1_rating: int,
+    user2_rating: int,
+    exclude_base_question_ids: list[str]
+):
     """
-    Get a question for a 1v1 match.
+    Background task: Generate variant and update queue status.
+    
+    Called asynchronously after /for-match returns immediately.
     """
-    # Rate limit check for variant generation (per-user limit)
-    check_generation_rate_limit(request.user1_id)
-    check_generation_rate_limit(request.user2_id)
-    
-    avg_rating = (request.user1_rating + request.user2_rating) / 2
-    target = 'Easy' if avg_rating < 1200 else 'Medium' if avg_rating < 1600 else 'Hard'
-    
-    logger.info("=" * 50)
-    logger.info(f"[STEP 1] FOR-MATCH REQUEST")
-    logger.info(f"         Users: {request.user1_id[:8]}..({request.user1_rating}) vs {request.user2_id[:8]}..({request.user2_rating})")
-    logger.info(f"         Target: {target} (avg: {avg_rating})")
+    db = get_supabase_client()
     
     try:
+        # Ensure queue entry exists (creates if missing - helps during testing)
+        existing = db.get_queue_entry(queue_id)
+        if not existing:
+            # Use first excluded base as shown_base_question_id (Q1 that was served)
+            shown_base = exclude_base_question_ids[0] if exclude_base_question_ids else None
+            db.create_queue_entry(queue_id, match_id, user1_id, user2_id, "generating", shown_base)
+        else:
+            db.update_queue_status(queue_id, "generating")
+        
+        avg_rating = (user1_rating + user2_rating) / 2
+        target = 'Easy' if avg_rating < 1200 else 'Medium' if avg_rating < 1600 else 'Hard'
+        
+        logger.info("=" * 50)
+        logger.info(f"[ASYNC] Variant generation started for queue_id={queue_id[:8]}...")
+        logger.info(f"        Users: {user1_id[:8]}..({user1_rating}) vs {user2_id[:8]}..({user2_rating})")
+        logger.info(f"        Target: {target} (avg: {avg_rating})")
+        logger.info(f"        Excluding {len(exclude_base_question_ids)} base question(s)")
+        
         if not settings.OPENAI_API_KEY:
-            logger.warning("         ✗ OpenAI not configured, using base questions")
-            return await _get_base_question_fallback(request)
+            logger.warning("        ✗ OpenAI not configured")
+            db.update_queue_status(queue_id, "failed", error_message="OpenAI not configured")
+            return
         
         service = get_variant_service()
-        result = await service.get_variant_for_match(
-            user1_id=request.user1_id,
-            user2_id=request.user2_id,
-            user1_rating=request.user1_rating,
-            user2_rating=request.user2_rating,
-            match_id=request.match_id
+        result = await service.get_variant_for_match_async(
+            user1_id=user1_id,
+            user2_id=user2_id,
+            user1_rating=user1_rating,
+            user2_rating=user2_rating,
+            match_id=match_id,
+            exclude_base_ids=exclude_base_question_ids
         )
         
         if not result.success:
-            logger.error(f"[ERROR] {result.error}")
-            return MatchQuestionResponse(success=False, error=result.error or "Failed to generate question")
+            logger.error(f"[ASYNC ERROR] {result.error}")
+            db.update_queue_status(queue_id, "failed", error_message=result.error)
+            return
         
-        logger.info("=" * 50)
-        logger.info(f"[DONE] Source: {result.source}, Time: {result.generation_time_ms}ms")
-        logger.info(f"       Title: \"{result.variant.get('title', 'N/A')[:45]}\"")
-        logger.info("=" * 50)
-        
-        # Handle both "difficulty" (base questions) and "effective_difficulty" (variants)
-        difficulty = result.variant.get("difficulty") or result.variant.get("effective_difficulty", "Medium")
-        
-        return MatchQuestionResponse(
-            success=True,
-            question={
-                "variant_id": result.variant_id,
-                "title": result.variant.get("title"),
-                "problem_statement": result.variant.get("problem_statement"),
-                "input_format": result.variant.get("input_format", {}),
-                "output_format": result.variant.get("output_format", {}),
-                "constraints": result.variant.get("constraints", []),
-                "examples": result.variant.get("examples", []),
-                "difficulty": difficulty,
-                "function_template": result.variant.get("function_template", {}),
-                "stdin_wrappers": result.variant.get("stdin_wrappers", {})
-            },
-            metadata={
-                "source": result.source,
-                "base_question_id": result.base_question_id,
-                "generation_time_ms": result.generation_time_ms
-            }
+        # Success - update queue with variant ID
+        db.update_queue_status(
+            queue_id=queue_id,
+            status="completed",
+            generated_variant_id=result.variant_id,
+            generation_base_question_id=result.base_question_id
         )
-    
+        
+        # Record user history for the variant
+        db.record_user_question_v2(user1_id, result.base_question_id, result.variant_id, "variant")
+        db.record_user_question_v2(user2_id, result.base_question_id, result.variant_id, "variant")
+        
+        logger.info("=" * 50)
+        logger.info(f"[ASYNC DONE] queue_id={queue_id[:8]}... variant_id={result.variant_id[:8]}...")
+        logger.info(f"             Title: \"{result.variant.get('title', 'N/A')[:45]}\"")
+        logger.info(f"             Time: {result.generation_time_ms}ms")
+        logger.info("=" * 50)
+        
     except Exception as e:
-        logger.error(f"[ERROR] get_question_for_match: {e}")
-        return MatchQuestionResponse(
+        logger.error(f"[ASYNC ERROR] Background generation failed: {e}")
+        db.update_queue_status(queue_id, "failed", error_message=str(e))
+
+
+@router.post("/for-match", response_model=AsyncGenerationResponse)
+async def trigger_variant_generation(
+    request: MatchQuestionRequest,
+    background_tasks: BackgroundTasks
+) -> AsyncGenerationResponse:
+    """
+    Trigger async variant generation for a match.
+    
+    This is a fire-and-forget endpoint:
+    - Returns immediately with acknowledgment
+    - Variant generation runs in background
+    - Node.js polls /variant-status/{queue_id} for completion
+    
+    Workflow:
+    1. Node.js shows base question to users immediately
+    2. Node.js creates queue entry and calls this endpoint
+    3. This endpoint returns immediately
+    4. Background task generates variant
+    5. Node.js polls for completion
+    6. When ready, Node.js can serve the variant as next question
+    """
+    logger.info(f"[FOR-MATCH] Received async generation request: queue_id={request.queue_id[:8]}...")
+    
+    # Rate limit check
+    try:
+        check_generation_rate_limit(request.user1_id)
+        check_generation_rate_limit(request.user2_id)
+    except Exception as e:
+        return AsyncGenerationResponse(
             success=False,
-            error=str(e)
+            queue_id=request.queue_id,
+            message=str(e)
         )
-
-
-
-async def _get_base_question_fallback(request: MatchQuestionRequest) -> MatchQuestionResponse:
-    """Fallback to base questions when OpenAI is not configured."""
-    db = get_supabase_client()
     
-    avg_rating = (request.user1_rating + request.user2_rating) / 2
-    target_difficulty = 'Easy' if avg_rating < 1200 else 'Medium' if avg_rating < 1600 else 'Hard'
-    
-    # Get user history
-    user1_history = db.get_user_seen_questions(request.user1_id)
-    user2_history = db.get_user_seen_questions(request.user2_id)
-    
-    seen_base_ids = list(set(
-        user1_history["base_question_ids"] + 
-        user2_history["base_question_ids"]
-    ))
-    
-    # Get base question
-    questions = db.get_base_questions_by_difficulty(
-        difficulty=target_difficulty,
-        exclude_ids=seen_base_ids,
-        limit=1
+    # Schedule background task
+    background_tasks.add_task(
+        _generate_variant_background,
+        queue_id=request.queue_id,
+        match_id=request.match_id,
+        user1_id=request.user1_id,
+        user2_id=request.user2_id,
+        user1_rating=request.user1_rating,
+        user2_rating=request.user2_rating,
+        exclude_base_question_ids=request.exclude_base_question_ids
     )
     
-    if not questions:
-        questions = db.get_all_base_questions(limit=1)
-    
-    if not questions:
-        return MatchQuestionResponse(
-            success=False,
-            error="No questions available"
-        )
-    
-    question = questions[0]
-    logger.info(f"[FALLBACK] Using base question: {question['title'][:40]}...")
-    
-    # Note: Not recording history since variant_id FK requires a real variant
-    # User history will not track this base question usage
-    
-    # Filter to only Python/Java/C++ for consistency
-    supported_langs = ["python", "java", "cpp"]
-    function_template = {k: v for k, v in (question.get("function_template") or {}).items() if k in supported_langs}
-    stdin_wrappers = {k: v for k, v in (question.get("stdin_wrappers") or {}).items() if k in supported_langs}
-    
-    return MatchQuestionResponse(
+    # Return immediately
+    return AsyncGenerationResponse(
         success=True,
-        question={
-            "variant_id": question["id"],  # This is base question ID, client handles differently
-            "title": question["title"],
-            "problem_statement": question["problem_statement"],
-            "input_format": question.get("input_format", {}),
-            "output_format": question.get("output_format", {}),
-            "constraints": question.get("constraints", []),
-            "examples": question.get("examples", []),
-            "difficulty": question["difficulty"],
-            "function_template": function_template,
-            "stdin_wrappers": stdin_wrappers
-        },
-        metadata={
-            "source": "base_question",
-            "base_question_id": question.get("leetcode_id"),
-            "generation_time_ms": 0
-        }
+        queue_id=request.queue_id,
+        message="Variant generation started"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Variant Generation Status Check
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/variant-status/{queue_id}", response_model=VariantStatusResponse)
+async def get_variant_status(queue_id: str) -> VariantStatusResponse:
+    """
+    Check the status of an async variant generation.
+    
+    Called by Node.js to poll for completion.
+    
+    Status values:
+    - pending: Generation not yet started
+    - generating: Generation in progress
+    - completed: Variant ready (variant_id returned)
+    - failed: Generation failed (error returned)
+    """
+    db = get_supabase_client()
+    
+    queue_entry = db.get_queue_entry(queue_id)
+    
+    if not queue_entry:
+        raise HTTPException(status_code=404, detail=f"Queue entry not found: {queue_id}")
+    
+    return VariantStatusResponse(
+        success=True,
+        queue_id=queue_id,
+        status=queue_entry.get("status", "pending"),
+        variant_id=queue_entry.get("generated_variant_id"),
+        error=queue_entry.get("error_message")
     )
 
 

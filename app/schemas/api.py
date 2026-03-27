@@ -11,14 +11,32 @@ from pydantic import BaseModel, Field
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class MatchQuestionRequest(BaseModel):
-    """Request from Match Service for a question."""
+    """Request from Node.js backend to trigger async variant generation."""
+    queue_id: str = Field(..., description="UUID from variant_generation_queue (created by Node.js)")
     match_id: str = Field(..., description="Unique match identifier")
     user1_id: str = Field(..., description="First user's ID")
     user2_id: str = Field(..., description="Second user's ID")
     user1_rating: int = Field(1200, ge=0, le=3500, description="User 1's rating")
     user2_rating: int = Field(1200, ge=0, le=3500, description="User 2's rating")
+    exclude_base_question_ids: list[str] = Field(default=[], description="Base question IDs to exclude from generation (Q1's base, Q2's base, etc.)")
     preferred_categories: list[str] = Field(default=[], description="Preferred question categories")
     exclude_categories: list[str] = Field(default=[], description="Categories to exclude")
+
+
+class AsyncGenerationResponse(BaseModel):
+    """Response acknowledging async variant generation request."""
+    success: bool
+    queue_id: str
+    message: str
+
+
+class VariantStatusResponse(BaseModel):
+    """Response for variant generation status check."""
+    success: bool
+    queue_id: str
+    status: Literal["pending", "generating", "completed", "failed"]
+    variant_id: Optional[str] = None
+    error: Optional[str] = None
 
 
 class QuestionInput(BaseModel):

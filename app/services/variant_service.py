@@ -80,7 +80,8 @@ class VariantService:
         """
         Auto-fix Java wrapper issues:
         1. Move {user_solution} outside Main class if it's inside
-        2. REJECT Scanner usage - will be marked as error for LLM to fix
+        2. Add System.exit(0) to prevent timeout (JVM hanging on stdin)
+        3. REJECT Scanner usage - will be marked as error for LLM to fix
         
         Returns modified stdin_wrappers and sets a flag if Scanner was detected.
         """
@@ -101,7 +102,37 @@ class VariantService:
             stdin_wrappers["java"] = java_wrapper
             logger.info("✓ Java wrapper auto-fixed (structure)")
         
-        # FIX 2: Detect Scanner - replace with BufferedReader pattern if simple
+        # FIX 2: Add System.exit(0) if not present - CRITICAL to prevent timeout!
+        if "System.exit(0)" not in java_wrapper and "System.exit(0);" not in java_wrapper:
+            logger.warning("⚠️ Auto-fixing Java wrapper: adding System.exit(0) to prevent timeout")
+            # Find the last System.out.println in main() and add System.exit(0) after it
+            # Look for pattern: System.out.println(...); followed by whitespace/newline then }
+            import re
+            # Add System.exit(0); before the closing brace of main() method
+            # Pattern: find "System.out.println" followed eventually by "}}" (end of main, end of Main class)
+            # Simpler approach: find last println before {user_solution} and add exit after
+            
+            # Find the position just before {user_solution}
+            user_sol_pos = java_wrapper.find("{user_solution}")
+            if user_sol_pos > 0:
+                # Find the last closing brace of Main class (before {user_solution})
+                main_part = java_wrapper[:user_sol_pos]
+                # Find last System.out.println in main part
+                last_println = main_part.rfind("System.out.println")
+                if last_println != -1:
+                    # Find the semicolon after this println
+                    semicolon_pos = main_part.find(";", last_println)
+                    if semicolon_pos != -1:
+                        # Insert System.exit(0); after the println
+                        java_wrapper = (
+                            java_wrapper[:semicolon_pos + 1] + 
+                            "\n        System.exit(0);" + 
+                            java_wrapper[semicolon_pos + 1:]
+                        )
+                        stdin_wrappers["java"] = java_wrapper
+                        logger.info("✓ Java wrapper auto-fixed (added System.exit(0))")
+        
+        # FIX 3: Detect Scanner - replace with BufferedReader pattern if simple
         if "Scanner" in java_wrapper and "new Scanner(System.in)" in java_wrapper:
             logger.warning("⚠️ Java wrapper uses Scanner - attempting auto-conversion to BufferedReader")
             
@@ -289,6 +320,116 @@ class VariantService:
             elapsed = int((time.time() - start_time) * 1000)
             
             # Track generation error
+            metrics.record_generation_failure("exception")
+            metrics.record_error("generation_exception")
+            metrics.record_request(elapsed)
+            
+            return VariantResult(
+                success=False,
+                generation_time_ms=elapsed,
+                error=str(e)
+            )
+    
+    async def get_variant_for_match_async(
+        self,
+        user1_id: str,
+        user2_id: str,
+        user1_rating: int,
+        user2_rating: int,
+        match_id: Optional[str] = None,
+        exclude_base_ids: Optional[list[str]] = None
+    ) -> VariantResult:
+        """
+        Generate a variant for async queue processing.
+        
+        Same as get_variant_for_match but:
+        - Accepts exclude_base_ids (bases shown to users or used for previous variants)
+        - Does NOT record user history (caller handles it)
+        - Does NOT use cache (always generate fresh)
+        """
+        start_time = time.time()
+        
+        try:
+            # Get user history
+            logger.info("[ASYNC S2] Fetching user history...")
+            user1_history = self.db.get_user_seen_questions(user1_id)
+            user2_history = self.db.get_user_seen_questions(user2_id)
+            
+            seen_base_ids = list(set(
+                user1_history["base_question_ids"] + 
+                user2_history["base_question_ids"]
+            ))
+            
+            # Add explicitly excluded base questions to exclusion list
+            if exclude_base_ids:
+                for base_id in exclude_base_ids:
+                    if base_id not in seen_base_ids:
+                        seen_base_ids.append(base_id)
+            
+            logger.info(f"           Exclusions: {len(seen_base_ids)} base questions")
+            
+            # Calculate target difficulty
+            avg_rating = (user1_rating + user2_rating) / 2
+            target_difficulty = self._get_target_difficulty(avg_rating)
+            logger.info(f"           Target: {target_difficulty} (avg rating: {avg_rating})")
+            
+            # Select base question (always generate fresh, no cache)
+            logger.info("[ASYNC S3] Selecting base question (excluding shown)...")
+            base_questions = self.db.get_base_questions_by_difficulty(
+                difficulty=target_difficulty,
+                exclude_ids=seen_base_ids,
+                limit=3
+            )
+            
+            if not base_questions:
+                # Try all difficulties if none found
+                base_questions = self.db.get_all_base_questions(limit=3)
+                # Filter out excluded
+                base_questions = [q for q in base_questions if q["id"] not in seen_base_ids]
+            
+            if not base_questions:
+                return VariantResult(success=False, error="No base questions available for generation")
+            
+            logger.info(f"           Found {len(base_questions)} candidates: {[q['title'][:25] for q in base_questions]}")
+            
+            # Generate & verify
+            for base_question in base_questions:
+                logger.info(f"[ASYNC S4] Generating variant from: \"{base_question['title'][:40]}\"")
+                
+                result = await self._generate_and_verify_variant(
+                    base_question=base_question,
+                    user1_rating=user1_rating,
+                    user2_rating=user2_rating
+                )
+                
+                if result.success:
+                    elapsed = int((time.time() - start_time) * 1000)
+                    result.generation_time_ms = elapsed
+                    
+                    # Track successful generation
+                    metrics.record_generation_success()
+                    metrics.record_request(elapsed)
+                    
+                    # Note: caller records user history, not us
+                    return result
+            
+            # All generation attempts failed
+            elapsed = int((time.time() - start_time) * 1000)
+            logger.error("[ASYNC ERROR] All variant generation attempts failed")
+            
+            metrics.record_generation_failure("all_attempts_failed")
+            metrics.record_request(elapsed)
+            
+            return VariantResult(
+                success=False,
+                generation_time_ms=elapsed,
+                error="Failed to generate variant after multiple attempts"
+            )
+            
+        except Exception as e:
+            logger.error(f"[ASYNC ERROR] Variant generation failed: {str(e)[:80]}")
+            elapsed = int((time.time() - start_time) * 1000)
+            
             metrics.record_generation_failure("exception")
             metrics.record_error("generation_exception")
             metrics.record_request(elapsed)

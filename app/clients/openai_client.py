@@ -61,17 +61,22 @@ ALWAYS use BufferedReader:
        public static void main(...) {
            Solution sol = new Solution();
            System.out.println(sol.methodName(args));
+           System.exit(0);  // CRITICAL: Force JVM exit!
        }
    }
    
    {user_solution}  // CORRECT! Outside Main = separate class
    
    - NEVER use Scanner (Scanner causes timeouts - use BufferedReader!)
-   - Read ONLY the lines you need, then print and exit
+   - Read ONLY the lines you need, then print and CALL System.exit(0)!
 
 4. PLACEHOLDER: Use {user_solution} exactly (lowercase, underscore)
 
 5. TEST CASES: Exactly 10 (3 visible is_hidden:false, 7 hidden is_hidden:true)
+   - Use SMALL, simple inputs (arrays ≤10 elements, integers ≤1000, strings ≤20 chars)
+   - Focus on EDGE CASES: empty input, single element, min/max bounds, duplicates
+   - NO stress tests or large inputs - test correctness, not performance
+   - Keep expected_stdout simple (single number, "true"/"false", short string)
 
 6. ALL 3 LANGUAGES: python, java, cpp - MUST have all three
 
@@ -94,7 +99,7 @@ solution_code:
 
 stdin_wrappers:
   python: "import sys\\n\\n{user_solution}\\n\\nif __name__ == '__main__':\\n    data = sys.stdin.read().strip()\\n    height = list(map(int, data.split()))\\n    result = maxArea(height)\\n    print(result)"
-  java: "import java.io.*;\\nimport java.util.*;\\n\\npublic class Main {\\n    public static void main(String[] args) throws IOException {\\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\\n        String line = br.readLine();\\n        String[] parts = line.trim().split(\\"\\\\\\\\s+\\");\\n        int[] height = new int[parts.length];\\n        for (int i = 0; i < parts.length; i++) height[i] = Integer.parseInt(parts[i]);\\n        Solution sol = new Solution();\\n        System.out.println(sol.maxArea(height));\\n    }\\n}\\n\\n{user_solution}"
+  java: "import java.io.*;\\nimport java.util.*;\\n\\npublic class Main {\\n    public static void main(String[] args) throws IOException {\\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\\n        String line = br.readLine();\\n        String[] parts = line.trim().split(\\"\\\\\\\\s+\\");\\n        int[] height = new int[parts.length];\\n        for (int i = 0; i < parts.length; i++) height[i] = Integer.parseInt(parts[i]);\\n        Solution sol = new Solution();\\n        System.out.println(sol.maxArea(height));\\n        System.exit(0);\\n    }\\n}\\n\\n{user_solution}"
   cpp: "#include <iostream>\\n#include <vector>\\n#include <algorithm>\\nusing namespace std;\\n\\n{user_solution}\\n\\nint main() {\\n    vector<int> height;\\n    int x;\\n    while (cin >> x) height.push_back(x);\\n    cout << maxArea(height) << endl;\\n    return 0;\\n}"
 
 function_template:
@@ -121,7 +126,7 @@ solution_code:
 
 stdin_wrappers:
   python: "import sys\\n{user_solution}\\nx = int(input())\\nresult = isPalindrome(x)\\nprint('true' if result else 'false')"
-  java: "import java.io.*;\\npublic class Main {\\n    public static void main(String[] args) throws IOException {\\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\\n        int x = Integer.parseInt(br.readLine().trim());\\n        Solution sol = new Solution();\\n        System.out.println(sol.isPalindrome(x) ? \\"true\\" : \\"false\\");\\n    }\\n}\\n{user_solution}"
+  java: "import java.io.*;\\npublic class Main {\\n    public static void main(String[] args) throws IOException {\\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\\n        int x = Integer.parseInt(br.readLine().trim());\\n        Solution sol = new Solution();\\n        System.out.println(sol.isPalindrome(x) ? \\"true\\" : \\"false\\");\\n        System.exit(0);\\n    }\\n}\\n{user_solution}"
   cpp: "#include <iostream>\\nusing namespace std;\\n{user_solution}\\nint main() {\\n    int x;\\n    cin >> x;\\n    cout << (isPalindrome(x) ? \\"true\\" : \\"false\\") << endl;\\n    return 0;\\n}"
 
 ════════════════════════════════════════════════════════════════════════════════
@@ -237,14 +242,15 @@ COMMON FAILURE PATTERNS AND FIXES
        public static void main(...) {
            Solution sol = new Solution();
            System.out.println(sol.method());
+           System.exit(0);  // CRITICAL!
        }
    }
    
    {user_solution}  // OUTSIDE Main - separate class!
 
 2. "Runtime timeout" with CORRECT actual output
-   → SCANNER BLOCKING! Replace with BufferedReader immediately!
-   → FIX: Replace Scanner with BufferedReader (see above)
+   → SCANNER BLOCKING OR MISSING System.exit(0)!
+   → FIX: Replace Scanner with BufferedReader AND add System.exit(0) after println!
 
 3. "Runtime timeout" with EMPTY actual output
    → Infinite loop OR wrapper blocking before output
@@ -267,7 +273,8 @@ public class Main {
         String line = br.readLine();  // Read ONLY what you need
         // Parse input
         Solution sol = new Solution();
-        System.out.println(sol.methodName(args));  // Print and exit
+        System.out.println(sol.methodName(args));  // Print result
+        System.exit(0);  // ⚠️ CRITICAL: Force JVM to exit immediately!
     }
 }
 

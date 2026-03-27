@@ -9,6 +9,7 @@ Tables:
 """
 
 import logging
+import random
 from typing import Optional
 from uuid import UUID
 
@@ -85,17 +86,29 @@ class SupabaseClient:
             if category:
                 query = query.eq("category", category)
             
-            response = query.limit(limit).execute()
-            return response.data or []
+            # Fetch more than needed, then shuffle for randomization
+            fetch_limit = min(limit * 3, 50)  # Fetch up to 3x or max 50
+            response = query.limit(fetch_limit).execute()
+            data = response.data or []
+            
+            # Randomize selection
+            random.shuffle(data)
+            return data[:limit]
         except Exception as e:
             logger.error(f"Error fetching base questions: {e}")
             return []
     
     def get_all_base_questions(self, limit: int = 100) -> list[dict]:
-        """Get all base questions."""
+        """Get all base questions (randomized)."""
         try:
-            response = self.client.table("base_questions").select("*").limit(limit).execute()
-            return response.data or []
+            # Fetch more than needed for randomization
+            fetch_limit = min(limit * 2, 200)
+            response = self.client.table("base_questions").select("*").limit(fetch_limit).execute()
+            data = response.data or []
+            
+            # Randomize selection
+            random.shuffle(data)
+            return data[:limit]
         except Exception as e:
             logger.error(f"Error fetching all base questions: {e}")
             return []
@@ -312,6 +325,123 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"Error storing variant: {e}")
             return None
+    
+    # ═══════════════════════════════════════════════════════════════
+    # Variant Generation Queue (async generation tracking)
+    # ═══════════════════════════════════════════════════════════════
+    
+    def get_queue_entry(self, queue_id: str) -> Optional[dict]:
+        """Get a queue entry by ID."""
+        try:
+            response = self.client.table("variant_generation_queue")\
+                .select("*")\
+                .eq("id", queue_id)\
+                .single()\
+                .execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Error fetching queue entry {queue_id}: {e}")
+            return None
+    
+    def create_queue_entry(
+        self,
+        queue_id: str,
+        match_id: str,
+        user1_id: str,
+        user2_id: str,
+        status: str = "pending",
+        shown_base_question_id: str = None
+    ) -> bool:
+        """
+        Create a queue entry if it doesn't exist.
+        
+        Used by microservice when Node.js hasn't created the entry yet (e.g., during testing).
+        """
+        try:
+            entry = {
+                "id": queue_id,
+                "match_id": match_id,
+                "user1_id": user1_id,
+                "user2_id": user2_id,
+                "status": status
+            }
+            if shown_base_question_id:
+                entry["shown_base_question_id"] = shown_base_question_id
+            
+            self.client.table("variant_generation_queue").insert(entry).execute()
+            logger.info(f"Created queue entry: {queue_id[:8]}...")
+            return True
+        except Exception as e:
+            # Entry might already exist, which is fine
+            if "duplicate key" in str(e).lower():
+                return True
+            logger.error(f"Error creating queue entry: {e}")
+            return False
+    
+    def update_queue_status(
+        self,
+        queue_id: str,
+        status: str,
+        generated_variant_id: str = None,
+        generation_base_question_id: str = None,
+        error_message: str = None
+    ) -> bool:
+        """Update queue entry status."""
+        try:
+            update_data = {"status": status}
+            
+            if generated_variant_id:
+                update_data["generated_variant_id"] = generated_variant_id
+            if generation_base_question_id:
+                update_data["generation_base_question_id"] = generation_base_question_id
+            if error_message:
+                update_data["error_message"] = error_message
+            if status in ("completed", "failed"):
+                update_data["completed_at"] = "now()"
+            
+            self.client.table("variant_generation_queue")\
+                .update(update_data)\
+                .eq("id", queue_id)\
+                .execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating queue status: {e}")
+            return False
+    
+    # ═══════════════════════════════════════════════════════════════
+    # User Question History (updated for question_type)
+    # ═══════════════════════════════════════════════════════════════
+    
+    def record_user_question_v2(
+        self,
+        user_id: str,
+        base_question_id: str,
+        variant_id: str = None,
+        question_type: str = "variant"
+    ) -> bool:
+        """
+        Record that a user has seen a question.
+        
+        Args:
+            user_id: User UUID
+            base_question_id: Base question UUID
+            variant_id: Variant UUID (None for base questions)
+            question_type: "base" or "variant"
+        """
+        try:
+            data = {
+                "user_id": user_id,
+                "base_question_id": base_question_id,
+                "question_type": question_type
+            }
+            if variant_id:
+                data["variant_id"] = variant_id
+            
+            self.client.table("user_question_history").insert(data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error recording user question: {e}")
+            return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
