@@ -289,6 +289,12 @@ RULES FOR FIXES
 - Preserve the stdin FORMAT (don't change format, just fix parsing)
 - Double-check your fix actually addresses the failure
 
+🔴 CRITICAL: PRESERVE {user_solution} PLACEHOLDER 🔴
+- When returning stdin_wrappers, you MUST include the literal text {user_solution}
+- This is where user code gets inserted - WITHOUT IT THE WRAPPER IS BROKEN
+- Copy the exact position of {user_solution} from the original wrapper
+- For Java: {user_solution} MUST appear AFTER the closing brace of Main class
+
 ════════════════════════════════════════════════════════════════════════════════
 RETURN FORMAT
 ════════════════════════════════════════════════════════════════════════════════
@@ -560,7 +566,10 @@ Return JSON with ONLY the fields that need fixing:
 {{"stdin_wrappers": {{"python": "...", "java": "...", "cpp": "..."}}}} - if parsing wrong
 {{"test_cases": [...]}} - if expected_stdout wrong
 
-Java reminder: Use BufferedReader, NOT Scanner (causes timeouts)."""
+🔴 CRITICAL REMINDERS:
+- Java: Use BufferedReader, NOT Scanner (causes timeouts)
+- ALL wrappers MUST contain {{user_solution}} placeholder (literal text, not replaced)
+- Java wrapper: {{user_solution}} MUST be AFTER the closing brace of Main class"""
 
         try:
             import time

@@ -147,22 +147,32 @@ async def _generate_variant_background(
             return
         
         # Success - update queue with variant ID
-        db.update_queue_status(
+        # Note: update_queue_status returns False if queue was already abandoned/fallback_used
+        was_updated = db.update_queue_status(
             queue_id=queue_id,
             status="completed",
             generated_variant_id=result.variant_id,
             generation_base_question_id=result.base_question_id
         )
         
-        # Record user history for the variant
-        db.record_user_question_v2(user1_id, result.base_question_id, result.variant_id, "variant")
-        db.record_user_question_v2(user2_id, result.base_question_id, result.variant_id, "variant")
-        
-        logger.info("=" * 50)
-        logger.info(f"[ASYNC DONE] queue_id={queue_id[:8]}... variant_id={result.variant_id[:8]}...")
-        logger.info(f"             Title: \"{result.variant.get('title', 'N/A')[:45]}\"")
-        logger.info(f"             Time: {result.generation_time_ms}ms")
-        logger.info("=" * 50)
+        if was_updated:
+            # Only record user history if the variant will actually be used
+            # If queue was already abandoned, a fallback was served instead
+            db.record_user_question_v2(user1_id, result.base_question_id, result.variant_id, "variant")
+            db.record_user_question_v2(user2_id, result.base_question_id, result.variant_id, "variant")
+            
+            logger.info("=" * 50)
+            logger.info(f"[ASYNC DONE] queue_id={queue_id[:8]}... variant_id={result.variant_id[:8]}...")
+            logger.info(f"             Title: \"{result.variant.get('title', 'N/A')[:45]}\"")
+            logger.info(f"             Time: {result.generation_time_ms}ms")
+            logger.info("=" * 50)
+        else:
+            # Queue was already abandoned/fallback_used - variant was generated but won't be used
+            logger.warning("=" * 50)
+            logger.warning(f"[ASYNC LATE] queue_id={queue_id[:8]}... generated variant but queue already abandoned")
+            logger.warning(f"             Variant {result.variant_id[:8]}... was generated but WON'T be used")
+            logger.warning(f"             (Fallback was already served to users)")
+            logger.warning("=" * 50)
         
     except Exception as e:
         logger.error(f"[ASYNC ERROR] Background generation failed: {e}")

@@ -730,6 +730,20 @@ class VariantService:
             modifications = variant_data.get("modifications", [])
             modifications_summary = "; ".join(modifications) if modifications else None
             
+            # Normalize complexity strings (must fit varchar(30))
+            expected_time = self._normalize_complexity(
+                variant_data.get("expected_time_complexity"), "O(n)"
+            )
+            expected_space = self._normalize_complexity(
+                variant_data.get("expected_space_complexity"), "O(1)"
+            )
+            allowed_time = self._normalize_complexity(
+                variant_data.get("allowed_time_complexity") or expected_time, "O(n^2)"
+            )
+            allowed_space = self._normalize_complexity(
+                variant_data.get("allowed_space_complexity") or expected_space, "O(n)"
+            )
+            
             # Store in database with all fields including stdin_wrappers and function_template
             stored = self.db.store_variant(
                 base_question_id=base_question_id,
@@ -748,10 +762,10 @@ class VariantService:
                 variant_hash=variant_hash,
                 modifications_summary=modifications_summary,
                 solution_explanation=variant_data.get("solution_explanation"),
-                expected_time_complexity=variant_data.get("expected_time_complexity", "O(n)"),
-                expected_space_complexity=variant_data.get("expected_space_complexity", "O(1)"),
-                allowed_time_complexity=variant_data.get("expected_time_complexity", "O(n^2)"),
-                allowed_space_complexity=variant_data.get("expected_space_complexity", "O(n)")
+                expected_time_complexity=expected_time,
+                expected_space_complexity=expected_space,
+                allowed_time_complexity=allowed_time,
+                allowed_space_complexity=allowed_space
             )
             
             return stored
@@ -759,6 +773,36 @@ class VariantService:
         except Exception as e:
             logger.error(f"         ✗ DB store failed: {str(e)[:50]}")
             return None
+    
+    def _normalize_complexity(self, complexity: str, default: str) -> str:
+        """
+        Normalize complexity string to fit varchar(30).
+        Extracts Big-O notation from verbose descriptions.
+        
+        Examples:
+            "O(Ln) where Ln is the length..." -> "O(Ln)"
+            "O(n log n) due to sorting" -> "O(n log n)"
+            None -> default
+        """
+        if not complexity:
+            return default
+        
+        complexity = str(complexity).strip()
+        
+        # If already short enough, return as-is
+        if len(complexity) <= 30:
+            return complexity
+        
+        # Try to extract just the O(...) part
+        import re
+        match = re.match(r'(O\([^)]+\))', complexity, re.IGNORECASE)
+        if match:
+            extracted = match.group(1)
+            if len(extracted) <= 30:
+                return extracted
+        
+        # Fallback: truncate to 30 chars
+        return complexity[:27] + "..."
     
     def _generate_variant_hash(self, variant_data: dict) -> str:
         """Generate hash for deduplication."""

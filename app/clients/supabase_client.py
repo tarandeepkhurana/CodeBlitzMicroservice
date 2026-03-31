@@ -386,8 +386,19 @@ class SupabaseClient:
         generation_base_question_id: str = None,
         error_message: str = None
     ) -> bool:
-        """Update queue entry status."""
+        """
+        Update queue entry status.
+        
+        IMPORTANT: Does NOT update if queue is already in a terminal state
+        (abandoned, fallback_used, variant_served) to prevent overwriting
+        entries that have already been handled via fallback.
+        """
         try:
+            # Terminal states that should NOT be overwritten
+            # If the queue was already abandoned or fallback was used,
+            # don't overwrite it even if generation completes later
+            terminal_states = ("abandoned", "fallback_used", "variant_served")
+            
             update_data = {"status": status}
             
             if generated_variant_id:
@@ -399,11 +410,22 @@ class SupabaseClient:
             if status in ("completed", "failed"):
                 update_data["completed_at"] = "now()"
             
-            self.client.table("variant_generation_queue")\
+            # Only update if NOT already in a terminal state
+            result = self.client.table("variant_generation_queue")\
                 .update(update_data)\
                 .eq("id", queue_id)\
+                .not_.in_("status", list(terminal_states))\
                 .execute()
-            return True
+            
+            # Check if any row was actually updated
+            if result.data and len(result.data) > 0:
+                logger.debug(f"Queue {queue_id[:8]}... updated to status={status}")
+                return True
+            else:
+                # No row updated - likely already in terminal state
+                logger.info(f"Queue {queue_id[:8]}... NOT updated (already in terminal state)")
+                return False
+                
         except Exception as e:
             logger.error(f"Error updating queue status: {e}")
             return False
