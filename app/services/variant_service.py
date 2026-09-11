@@ -17,8 +17,8 @@ from typing import Optional
 from dataclasses import dataclass
 
 from app.clients.openai_client import get_openai_client
-from app.clients.piston_client import get_piston_client
 from app.clients.supabase_client import get_supabase_client
+from app.services.verification import verify_variant, python_code
 from app.config import settings
 from app.core import get_metrics
 
@@ -39,16 +39,6 @@ class VariantResult:
     base_question_id: Optional[str] = None
     generation_time_ms: int = 0
     source: str = "generated"  # "generated", "cached", "base_question"
-    error: Optional[str] = None
-
-
-@dataclass
-class VerificationResult:
-    """Result of solution verification."""
-    success: bool
-    passed_tests: int = 0
-    total_tests: int = 0
-    failures: list = None
     error: Optional[str] = None
 
 
@@ -75,113 +65,6 @@ class VariantService:
     def __init__(self):
         self.openai = get_openai_client()
         self.db = get_supabase_client()
-    
-    def _fix_java_wrapper_structure(self, stdin_wrappers: dict, base_question: dict = None) -> dict:
-        """
-        Auto-fix Java wrapper issues:
-        1. Move {user_solution} outside Main class if it's inside
-        2. Add System.exit(0) to prevent timeout (JVM hanging on stdin)
-        3. REJECT Scanner usage - will be marked as error for LLM to fix
-        
-        Returns modified stdin_wrappers and sets a flag if Scanner was detected.
-        """
-        java_wrapper = stdin_wrappers.get("java", "")
-        if not java_wrapper or "{user_solution}" not in java_wrapper:
-            return stdin_wrappers
-        
-        stdin_wrappers = stdin_wrappers.copy()
-        
-        # FIX 1: Move {user_solution} outside Main class
-        placeholder_pos = java_wrapper.find("{user_solution}")
-        last_brace_pos = java_wrapper.rfind("}")
-        
-        if placeholder_pos < last_brace_pos:
-            logger.warning("⚠️ Auto-fixing Java wrapper: moving {user_solution} outside Main class")
-            java_wrapper = java_wrapper.replace("{user_solution}", "")
-            java_wrapper = java_wrapper.rstrip() + "\n\n{user_solution}"
-            stdin_wrappers["java"] = java_wrapper
-            logger.info("✓ Java wrapper auto-fixed (structure)")
-        
-        # FIX 2: Add System.exit(0) if not present - CRITICAL to prevent timeout!
-        if "System.exit(0)" not in java_wrapper and "System.exit(0);" not in java_wrapper:
-            logger.warning("⚠️ Auto-fixing Java wrapper: adding System.exit(0) to prevent timeout")
-            # Find the last System.out.println in main() and add System.exit(0) after it
-            # Look for pattern: System.out.println(...); followed by whitespace/newline then }
-            import re
-            # Add System.exit(0); before the closing brace of main() method
-            # Pattern: find "System.out.println" followed eventually by "}}" (end of main, end of Main class)
-            # Simpler approach: find last println before {user_solution} and add exit after
-            
-            # Find the position just before {user_solution}
-            user_sol_pos = java_wrapper.find("{user_solution}")
-            if user_sol_pos > 0:
-                # Find the last closing brace of Main class (before {user_solution})
-                main_part = java_wrapper[:user_sol_pos]
-                # Find last System.out.println in main part
-                last_println = main_part.rfind("System.out.println")
-                if last_println != -1:
-                    # Find the semicolon after this println
-                    semicolon_pos = main_part.find(";", last_println)
-                    if semicolon_pos != -1:
-                        # Insert System.exit(0); after the println
-                        java_wrapper = (
-                            java_wrapper[:semicolon_pos + 1] + 
-                            "\n        System.exit(0);" + 
-                            java_wrapper[semicolon_pos + 1:]
-                        )
-                        stdin_wrappers["java"] = java_wrapper
-                        logger.info("✓ Java wrapper auto-fixed (added System.exit(0))")
-        
-        # FIX 3: Detect Scanner - replace with BufferedReader pattern if simple
-        if "Scanner" in java_wrapper and "new Scanner(System.in)" in java_wrapper:
-            logger.warning("⚠️ Java wrapper uses Scanner - attempting auto-conversion to BufferedReader")
-            
-            # Simple pattern replacement for common Scanner usage
-            fixed = java_wrapper
-            
-            # Add IOException import if not present
-            if "throws IOException" not in fixed and "throws Exception" not in fixed:
-                fixed = fixed.replace(
-                    "public static void main(String[] args) {",
-                    "public static void main(String[] args) throws IOException {"
-                )
-                fixed = fixed.replace(
-                    "public static void main(String[] args){",
-                    "public static void main(String[] args) throws IOException {"
-                )
-            
-            # Replace Scanner creation with BufferedReader
-            fixed = fixed.replace(
-                "Scanner sc = new Scanner(System.in);",
-                "BufferedReader br = new BufferedReader(new InputStreamReader(System.in));"
-            )
-            fixed = fixed.replace(
-                "Scanner scanner = new Scanner(System.in);",
-                "BufferedReader br = new BufferedReader(new InputStreamReader(System.in));"
-            )
-            
-            # Replace common Scanner methods - this is approximate
-            # sc.nextInt() → Integer.parseInt(br.readLine().trim())
-            # sc.nextLine() → br.readLine()
-            # For complex cases, LLM will need to fix
-            
-            # Remove import java.util.Scanner if present and add BufferedReader imports
-            if "import java.util.Scanner;" in fixed:
-                fixed = fixed.replace("import java.util.Scanner;", "")
-            if "import java.io.*;" not in fixed:
-                # Add import after first import statement
-                if "import java.util.*;" in fixed:
-                    fixed = fixed.replace("import java.util.*;", "import java.util.*;\nimport java.io.*;")
-                elif "import " in fixed:
-                    first_import = fixed.find("import ")
-                    end_of_first_import = fixed.find(";", first_import)
-                    fixed = fixed[:end_of_first_import+1] + "\nimport java.io.*;" + fixed[end_of_first_import+1:]
-            
-            if fixed != java_wrapper:
-                stdin_wrappers["java"] = fixed
-                logger.info("✓ Java wrapper auto-converted Scanner→BufferedReader (partial)")
-        
-        return stdin_wrappers
     
     async def get_variant_for_match(
         self,
@@ -451,141 +334,124 @@ class VariantService:
         
         Flow:
         1. Generate variant via LLM
-        2. Verify all 3 languages
-        3. If fails → send failures to LLM for fix → re-verify
+        2. Verify it (see app/services/verification.py): ground truth by
+           execution, brute-force differential testing, cross-language agreement
+        3. If it fails → send the concrete failures to the LLM for a fix → re-verify
         4. Repeat fix up to MAX_FIX_ATTEMPTS times
-        5. If still fails → try fresh generation
+        5. If still failing → try a fresh generation
+
+        Only a variant that passes verification is stored, and it is stored
+        exactly as verified (ground-truth test outputs, same wrappers).
         """
         import os
         from datetime import datetime
-        
+
         # Create debug folder
         debug_dir = "debug_variants"
         os.makedirs(debug_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
+        def dump(name: str, data) -> None:
+            path = f"{debug_dir}/{timestamp}_{name}.json"
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"         📁 Saved: {path}")
+
         user_context = {
             "avg_rating": (user1_rating + user2_rating) / 2,
             "skill_level": self._get_skill_level(user1_rating, user2_rating)
         }
-        
+
+        llm_rounds = 0  # generations + fixes, recorded as validation_attempts
+
         for gen_attempt in range(self.MAX_GENERATION_ATTEMPTS):
             logger.info(f"         LLM generation {gen_attempt + 1}/{self.MAX_GENERATION_ATTEMPTS}...")
-            
-            # Track generation attempt
             metrics.record_generation_attempt()
-            
-            # Generate variant via LLM
+
             variant_data = await self.openai.generate_variant(
                 base_question=base_question,
                 user_context=user_context
             )
-            
+            llm_rounds += 1
+
             if not variant_data:
-                logger.warning(f"         ✗ LLM returned None")
+                logger.warning("         ✗ LLM returned None")
                 continue
-            
-            test_count = len(variant_data.get('test_cases', []))
-            logger.info(f"         ✓ Generated with {test_count} test cases")
-            
-            # DEBUG: Save LLM response
-            debug_file = f"{debug_dir}/{timestamp}_gen{gen_attempt+1}.json"
-            with open(debug_file, "w", encoding="utf-8") as f:
-                json.dump(variant_data, f, indent=2)
-            logger.info(f"         📁 Saved: {debug_file}")
-            
-            # Verify initial generation
-            logger.info("[STEP 6] Verifying solution via PISTON...")
-            verification = await self._verify_variant(variant_data, base_question)
-            
-            # DEBUG: Save verification failures
-            if not verification.success and verification.failures:
-                fail_file = f"{debug_dir}/{timestamp}_gen{gen_attempt+1}_failures.json"
-                with open(fail_file, "w", encoding="utf-8") as f:
-                    json.dump(verification.failures, f, indent=2)
-                logger.info(f"         📁 Failures saved: {fail_file}")
-            
-            if verification.success:
-                store_result = await self._store_and_return_variant(variant_data, base_question)
-                if store_result.success:
-                    return store_result
-                # Storage failed (validation issue) - continue to fix loop
-                logger.warning(f"         Storage validation failed, trying fixes...")
-            
-            # Verification failed - try fix loop
-            failed_langs = set(f["language"] for f in (verification.failures or []))
-            logger.warning(f"         ✗ Verification FAILED: {verification.passed_tests}/{verification.total_tests} (langs: {failed_langs})")
-            
-            # FIX LOOP: Send failures to LLM, re-verify
+
+            logger.info(f"         ✓ Generated with {len(variant_data.get('test_cases', []))} test cases")
+            dump(f"gen{gen_attempt + 1}", variant_data)
+
+            logger.info("[STEP 6] Verifying via PISTON (truth, brute force, 3 languages)...")
+            outcome = await verify_variant(variant_data)
+
+            # Fix loop: send concrete failures back to the LLM, re-verify
             current_variant = variant_data
-            for fix_attempt in range(self.MAX_FIX_ATTEMPTS):
-                logger.info(f"         Sending failures to LLM for fix ({fix_attempt + 1}/{self.MAX_FIX_ATTEMPTS})...")
-                
+            fix_attempt = 0
+            while not outcome.success and fix_attempt < self.MAX_FIX_ATTEMPTS:
+                fix_attempt += 1
+                dump(f"gen{gen_attempt + 1}_fix{fix_attempt - 1}_failures", outcome.failures)
+                kinds = sorted({f.get("kind", "?") for f in outcome.failures})
+                logger.warning(f"         ✗ Verification failed ({len(outcome.failures)} failures: {kinds})")
+                logger.info(f"         Sending failures to LLM for fix ({fix_attempt}/{self.MAX_FIX_ATTEMPTS})...")
+
                 fixed_variant = await self.openai.fix_variant(
                     variant=current_variant,
-                    failures=verification.failures or [],
-                    base_question=base_question  # Pass base for context
+                    failures=outcome.failures,
+                    base_question=base_question
                 )
-                
+                llm_rounds += 1
+
                 if not fixed_variant:
-                    logger.warning(f"         ✗ LLM fix returned None")
+                    logger.warning("         ✗ LLM fix returned None")
                     metrics.record_fix_attempt(success=False)
                     break  # Can't fix, try fresh generation
-                
-                # VALIDATION: Ensure LLM didn't remove {user_solution} placeholders
+
+                # Ensure the LLM didn't remove {user_solution} placeholders
                 placeholder_error = self._validate_placeholders(fixed_variant)
                 if placeholder_error:
                     logger.warning(f"         ✗ Fix broke wrappers: {placeholder_error}")
-                    logger.info("         Keeping previous version, trying next fix...")
-                    continue  # Skip this fix, try another
-                
-                # Re-verify fixed variant
-                logger.info("         Re-verifying fixed variant...")
-                
-                # Debug: Log what we got from fix
-                tc_count = len(fixed_variant.get('test_cases', []))
-                sol_langs = list(fixed_variant.get('solution_code', {}).keys())
-                wrap_langs = list(fixed_variant.get('stdin_wrappers', {}).keys())
-                logger.info(f"         Fixed variant: {tc_count} tests, solutions: {sol_langs}, wrappers: {wrap_langs}")
-                
-                verification = await self._verify_variant(fixed_variant, base_question)
-                
-                if verification.success:
-                    logger.info(f"         ✓ Fix successful! {verification.passed_tests}/{verification.total_tests}")
-                    metrics.record_fix_attempt(success=True)
-                    store_result = await self._store_and_return_variant(fixed_variant, base_question)
-                    if store_result.success:
-                        return store_result
-                    # Storage failed (validation) - continue to next fix or fresh generation
-                    logger.warning(f"         Storage validation failed after fix, continuing...")
-                    continue
-                
-                # Still failing - log details and track
-                metrics.record_fix_attempt(success=False)
-                if verification.total_tests == 0:
-                    logger.error(f"         ✗ Verification returned 0 tests! Error: {verification.error}")
-                else:
-                    failed_langs = set(f["language"] for f in (verification.failures or []))
-                    logger.warning(f"         ✗ Still failing: {verification.passed_tests}/{verification.total_tests} (langs: {failed_langs})")
-                current_variant = fixed_variant  # Use fixed version for next fix attempt
-            
-            logger.info("         Fix attempts exhausted, trying fresh generation...")
-        
+                    metrics.record_fix_attempt(success=False)
+                    continue  # Keep previous version, try another fix
+
+                current_variant = fixed_variant
+                outcome = await verify_variant(current_variant)
+                metrics.record_fix_attempt(success=outcome.success)
+
+            if outcome.success:
+                logger.info("         ✓ Verification passed")
+                store_result = await self._store_and_return_variant(
+                    outcome.variant, base_question, outcome.report, llm_rounds
+                )
+                if store_result.success:
+                    return store_result
+                logger.warning("         Storage failed, trying fresh generation...")
+            else:
+                dump(f"gen{gen_attempt + 1}_final_failures", outcome.failures)
+                logger.info("         Fix attempts exhausted, trying fresh generation...")
+
         return VariantResult(success=False, error=f"Generation/fix failed after {self.MAX_GENERATION_ATTEMPTS} generations × {self.MAX_FIX_ATTEMPTS} fixes")
     
-    async def _store_and_return_variant(self, variant_data: dict, base_question: dict) -> VariantResult:
-        """Store verified variant and return result."""
-        # VALIDATION: Ensure we have exactly 10 test cases
+    async def _store_and_return_variant(
+        self,
+        variant_data: dict,
+        base_question: dict,
+        report: dict,
+        llm_rounds: int
+    ) -> VariantResult:
+        """Store a verified variant (exactly as verified) and return result."""
+        # VALIDATION: Ensure we have at least 10 test cases
         test_count = len(variant_data.get("test_cases", []))
         if test_count < 10:
             logger.error(f"         ❌ Cannot store: only {test_count} test cases (need 10)")
             return VariantResult(success=False, error=f"Only {test_count} test cases, need 10")
-        
+
         logger.info("[STEP 7] Storing validated variant...")
         stored = self._store_variant(
             variant_data=variant_data,
             base_question_id=base_question["id"],
-            base_difficulty=base_question["difficulty"]
+            base_difficulty=base_question["difficulty"],
+            report=report,
+            llm_rounds=llm_rounds
         )
         
         if stored:
@@ -601,120 +467,13 @@ class VariantService:
             logger.error("         ✗ DB storage failed")
             return VariantResult(success=False, error="DB storage failed")
     
-    async def _verify_variant(self, variant_data: dict, base_question: dict = None) -> VerificationResult:
-        """
-        Verify variant's solution passes all test cases for ALL 3 languages.
-        
-        Uses the variant's own stdin_wrappers with solution_code inserted.
-        All languages must pass all tests for verification to succeed.
-        
-        Args:
-            variant_data: The variant to verify
-            base_question: Original base question (for auto-fix reference)
-        """
-        test_cases = variant_data.get("test_cases", [])
-        solution_code = variant_data.get("solution_code", {})
-        stdin_wrappers = variant_data.get("stdin_wrappers", {})
-        
-        if not test_cases:
-            return VerificationResult(success=False, error="No test cases in variant")
-        
-        if not stdin_wrappers:
-            return VerificationResult(success=False, error="No stdin_wrappers in variant")
-        
-        # Pre-validate and auto-fix Java wrapper structure
-        stdin_wrappers = self._fix_java_wrapper_structure(stdin_wrappers, base_question)
-        
-        # Languages to verify (all 3 must pass)
-        languages = ["python", "java", "cpp"]
-        
-        try:
-            piston = await get_piston_client()
-            import time
-            start_time = time.time()
-            
-            all_failures = []
-            total_passed = 0
-            total_tests = 0
-            
-            for lang in languages:
-                solution = solution_code.get(lang)
-                wrapper = stdin_wrappers.get(lang)
-                
-                if not solution:
-                    return VerificationResult(
-                        success=False, 
-                        error=f"No {lang} solution in variant"
-                    )
-                if not wrapper:
-                    return VerificationResult(
-                        success=False,
-                        error=f"No {lang} stdin_wrapper in variant"
-                    )
-                
-                # Build executable: replace placeholder with solution
-                # Support both {USER_SOLUTION_CODE} and {user_solution} placeholders
-                if "{USER_SOLUTION_CODE}" in wrapper:
-                    executable = wrapper.replace("{USER_SOLUTION_CODE}", solution)
-                elif "{user_solution}" in wrapper:
-                    executable = wrapper.replace("{user_solution}", solution)
-                else:
-                    return VerificationResult(
-                        success=False,
-                        error=f"No placeholder in {lang} stdin_wrapper"
-                    )
-                
-                # Execute all test cases for this language
-                results = await piston.execute_test_cases_parallel(
-                    language=lang,
-                    code=executable,
-                    test_cases=test_cases,
-                    early_exit_on_failure=False
-                )
-                
-                passed = sum(1 for r in results if r.passed)
-                total_passed += passed
-                total_tests += len(test_cases)
-                
-                # Track verification result for this language
-                metrics.record_verification(lang, passed, len(test_cases))
-                
-                # Collect failures with FULL details for debugging
-                for r in results:
-                    if not r.passed:
-                        all_failures.append({
-                            "language": lang,
-                            "index": r.test_index,
-                            "stdin": r.stdin,  # Full input
-                            "expected": r.expected_stdout,  # Full expected
-                            "actual": r.actual_stdout,  # Full actual output
-                            "error": r.error,
-                            "stderr": getattr(r, 'stderr', None)  # Include stderr if available
-                        })
-                
-                logger.info(f"         {lang.upper()}: {passed}/{len(test_cases)} passed")
-            
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            all_passed = len(all_failures) == 0
-            
-            logger.info(f"         TOTAL: {total_passed}/{total_tests} in {elapsed_ms}ms")
-            
-            return VerificationResult(
-                success=all_passed,
-                passed_tests=total_passed,
-                total_tests=total_tests,
-                failures=all_failures if all_failures else None  # Return ALL failures for debugging
-            )
-            
-        except Exception as e:
-            logger.error(f"         ✗ Verification error: {str(e)[:80]}")
-            return VerificationResult(success=False, error=str(e))
-    
     def _store_variant(
         self,
         variant_data: dict,
         base_question_id: str,
-        base_difficulty: str
+        base_difficulty: str,
+        report: dict,
+        llm_rounds: int
     ) -> Optional[dict]:
         """Store validated variant in database."""
         try:
@@ -765,9 +524,20 @@ class VariantService:
                 expected_time_complexity=expected_time,
                 expected_space_complexity=expected_space,
                 allowed_time_complexity=allowed_time,
-                allowed_space_complexity=allowed_space
+                allowed_space_complexity=allowed_space,
+                # Same shape as base_questions.test_generator_code ({"python": ...}),
+                # plus the evidence needed to re-run and justify verification.
+                test_generator_code={
+                    "python": python_code(variant_data.get("test_generator_code")),
+                    "brute_force_python": python_code(variant_data.get("brute_force_solution")),
+                    "verification_report": report,
+                },
+                edge_case_types=[
+                    str(e) for e in (variant_data.get("edge_case_types") or []) if e
+                ][:20] or None,
+                validation_attempts=llm_rounds
             )
-            
+
             return stored
             
         except Exception as e:

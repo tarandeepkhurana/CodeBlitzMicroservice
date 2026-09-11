@@ -10,6 +10,7 @@ Tables:
 
 import logging
 import random
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -292,11 +293,18 @@ class SupabaseClient:
         expected_time_complexity: str = "O(n)",
         expected_space_complexity: str = "O(1)",
         allowed_time_complexity: str = "O(n^2)",
-        allowed_space_complexity: str = "O(n)"
+        allowed_space_complexity: str = "O(n)",
+        test_generator_code: Optional[dict] = None,
+        edge_case_types: Optional[list[str]] = None,
+        validation_attempts: int = 1
     ) -> Optional[dict]:
         """Store a new validated variant with all execution fields."""
         try:
             variant_data = {
+                "test_generator_code": test_generator_code,
+                "edge_case_types": edge_case_types,
+                "validation_attempts": validation_attempts,
+                "last_validated_at": datetime.now(timezone.utc).isoformat(),
                 "base_question_id": base_question_id,
                 "title": title,
                 "problem_statement": problem_statement,

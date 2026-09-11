@@ -80,6 +80,30 @@ ALWAYS use BufferedReader:
 
 6. ALL 3 LANGUAGES: python, java, cpp - MUST have all three
 
+7. BRUTE FORCE: also return "brute_force_solution": {"python": "..."}
+   - The SIMPLEST obviously-correct solution: try every possibility (nested loops,
+     all subsets, plain recursion). Speed does not matter, correctness does.
+   - Write it independently of the optimal idea - it is used to cross-check it.
+   - SAME function name and parameters as solution_code.python (the same Python
+     wrapper runs both).
+
+8. GENERATOR: also return "test_generator_code": {"python": "..."} defining
+     import random
+     def generate_test_case(size='small', edge_case=None):
+         ...
+         return stdin_string
+   - Returns ONE random VALID input as a stdin string, in exactly the test_cases
+     stdin format. Use the `random` module (it is seeded for you).
+   - size='small' means tiny inputs (e.g. n <= 8, values within about -10..10)
+     so the brute force finishes instantly. Respect EVERY constraint
+     (sortedness, uniqueness, ranges, guaranteed-answer promises...).
+
+9. expected_stdout in test_cases is only YOUR PREDICTION. The real expected
+   outputs are computed by EXECUTING your solution_code, which is then
+   cross-checked against brute_force_solution on hundreds of random inputs
+   and against the Java/C++ solutions. A wrong solution gets the question
+   rejected - make solution_code exactly match the problem statement.
+
 ════════════════════════════════════════════════════════════════════════════════
 WORKING EXAMPLE 1: Single Array Input → Integer Output
 ════════════════════════════════════════════════════════════════════════════════
@@ -171,9 +195,16 @@ OUTPUT JSON SCHEMA (REQUIRED STRUCTURE)
     "java": "class Solution {\\n    returnType methodName(params) {\\n        return ...;\\n    }\\n}",
     "cpp": "returnType functionName(params) {\\n    return ...;\\n}"
   },
+  "brute_force_solution": {
+    "python": "def functionName(params):\\n    # simplest exhaustive approach"
+  },
+  "test_generator_code": {
+    "python": "import random\\n\\ndef generate_test_case(size='small', edge_case=None):\\n    ...\\n    return stdin_string"
+  },
+  "edge_case_types": ["empty_input", "single_element", "duplicates", "..."],
   "solution_explanation": "Algorithm description",
-  "expected_time_complexity": "O(n)",
-  "expected_space_complexity": "O(1)",
+  "expected_time_complexity": "O(n)",    // ⚠️ MUST be from STANDARD LIST below!
+  "expected_space_complexity": "O(1)",   // ⚠️ MUST be from STANDARD LIST below!
   "test_cases": [
     {"stdin": "...", "expected_stdout": "...", "is_hidden": false},
     {"stdin": "...", "expected_stdout": "...", "is_hidden": false},
@@ -189,6 +220,21 @@ OUTPUT JSON SCHEMA (REQUIRED STRUCTURE)
 }
 
 ════════════════════════════════════════════════════════════════════════════════
+⚠️ COMPLEXITY VALUES - USE ONLY THESE EXACT STRINGS
+════════════════════════════════════════════════════════════════════════════════
+Pick expected_time_complexity and expected_space_complexity ONLY from this list:
+  "O(1)", "O(1)*", "O(log n)", "O(log²n)", "O(log³n)", "O(√n)", "O(n)",
+  "O(n log log n)", "O(n log n)", "O(n+m)", "O(min(n,m))", "O(n*m)",
+  "O((V+E)log V)", "O(n log k)", "O(n²)", "O(n² log n)", "O(n³)",
+  "O(V+E)", "O(2^n)", "O(n!)", "O(n!/(k!(n-k)!))", "O(recursive)"
+
+DO NOT write verbose descriptions like "O(n) where n is array length"!
+DO NOT invent new complexity notations!
+Just pick the closest standard notation from the list above.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════════════
 VERIFICATION CHECKLIST (before returning JSON)
 ════════════════════════════════════════════════════════════════════════════════
 □ stdin format matches base_question.test_cases_sample exactly
@@ -196,6 +242,8 @@ VERIFICATION CHECKLIST (before returning JSON)
 □ Java uses BufferedReader (NOT Scanner)
 □ All wrappers use {user_solution} placeholder
 □ solution_code is correct for all 3 languages
+□ brute_force_solution (python) is exhaustive, obviously correct, same signature
+□ test_generator_code returns valid small stdin strings in the exact test format
 □ Ran solution mentally on test cases - expected_stdout is correct
 □ Exactly 10 test_cases (3 visible, 7 hidden)
 □ Output format matches (lowercase "true"/"false" for boolean, space-separated for arrays)
@@ -203,6 +251,24 @@ VERIFICATION CHECKLIST (before returning JSON)
 
 # Fix prompt for when verification fails
 FIX_VARIANT_SYSTEM_PROMPT = """You fix coding problem variants that failed PISTON execution verification.
+
+════════════════════════════════════════════════════════════════════════════════
+HOW VERIFICATION WORKS (read first)
+════════════════════════════════════════════════════════════════════════════════
+- Expected outputs are COMPUTED by running solution_code.python on each test
+  input. You cannot fix anything by editing expected_stdout - it is ignored.
+- brute_force_solution.python must print the same output as solution_code.python
+  on every test and on random inputs from test_generator_code. When they
+  disagree, re-read the problem statement and decide which one is wrong; fix
+  that one (or make the statement unambiguous if both readings are plausible).
+- solution_code.java and solution_code.cpp must print EXACTLY what Python
+  prints (same format, same spacing, lowercase true/false).
+- Failure kinds you may see: reference_error (Python solution crashed),
+  brute_mismatch, brute_force_error, generator_error, language_mismatch,
+  harness_incompatible (Python wrapper must read input via sys.stdin/input(),
+  never open(0)), too_few_random_cases (make 'small' inputs tinier or the
+  brute force faster), template_mismatch (function_template must compile
+  inside the wrapper - players start from it), missing_fields.
 
 ════════════════════════════════════════════════════════════════════════════════
 ⚠️ CRITICAL JAVA ISSUE: SCANNER CAUSES TIMEOUTS! ⚠️
@@ -301,13 +367,59 @@ RETURN FORMAT
 Return JSON with ONLY the fields that need fixing:
 
 {"solution_code": {"python": "...", "java": "...", "cpp": "..."}}
-OR
 {"stdin_wrappers": {"python": "...", "java": "...", "cpp": "..."}}
-OR
-{"test_cases": [exactly 10 test cases with stdin/expected_stdout/is_hidden]}
-OR combination of above
+{"brute_force_solution": {"python": "..."}}
+{"test_generator_code": {"python": "..."}}
+{"function_template": {"python": "...", "java": "...", "cpp": "..."}}
+{"test_cases": [at least 10 test cases - only if some INPUTS are invalid]}
+{"problem_statement": "..."}  (only to remove an ambiguity)
+OR any combination of the above
 
 DO NOT return fields that are working correctly."""
+
+
+def _python_field(value) -> Optional[str]:
+    """Code from a {"python": code} field or a plain string."""
+    if isinstance(value, dict):
+        value = value.get("python")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _describe_failures(failures: list[dict], max_items: int = 10) -> str:
+    """Render verification failures (see app/services/verification.py) for the fix prompt."""
+    lines = []
+    for f in failures[:max_items]:
+        kind = f.get("kind", "unknown")
+        where = f"test #{f['index']}" if "index" in f else (
+            f"test #{f['test']}" if "test" in f else (f"random input (seed {f['seed']})" if "seed" in f else ""))
+        if kind == "brute_mismatch":
+            lines.append(
+                f"- brute_mismatch on {where}: solution_code.python and brute_force_solution disagree.\n"
+                f"    Input: {f.get('stdin')!r}\n    solution_code.python printed: {f.get('reference')!r}\n"
+                f"    brute_force_solution printed: {f.get('brute_force')!r}")
+        elif kind == "language_mismatch":
+            lines.append(
+                f"- language_mismatch: {f.get('language', '').upper()} differs from Python on {where}.\n"
+                f"    Input: {f.get('stdin')!r}\n    Python printed: {f.get('expected')!r}\n"
+                f"    {f.get('language')} printed: {f.get('actual')!r}\n    Error: {f.get('error') or 'none'}")
+        elif kind == "missing_fields":
+            lines.append(f"- missing_fields: {f.get('detail')}")
+        elif kind == "template_mismatch":
+            lang = f.get("language")
+            lines.append(
+                f"- template_mismatch: function_template.{lang} does not compile inside stdin_wrappers.{lang} "
+                f"(players start from this template). Make them agree: same function/method name, "
+                f"static-ness, parameter and return types.\n    Error: {f.get('error')}")
+        elif kind == "harness_incompatible":
+            lines.append("- harness_incompatible: the Python wrapper must read input via sys.stdin / input() (not open(0)).")
+        elif kind == "too_few_random_cases":
+            lines.append(f"- too_few_random_cases: only {f.get('checked')} random inputs checked "
+                         f"({f.get('stopped')}); make size='small' inputs tinier or the brute force faster.")
+        else:
+            lines.append(f"- {kind} {where}: input {f.get('stdin')!r} error: {f.get('error')}")
+    if len(failures) > max_items:
+        lines.append(f"- ... and {len(failures) - max_items} more failures")
+    return "\n".join(lines)
 
 
 class OpenAIClient:
@@ -410,7 +522,12 @@ class OpenAIClient:
 
 5. PLACEHOLDER: Use {user_solution} in all wrappers
 
-6. ALL 3 LANGUAGES: python, java, cpp - must have all"""
+6. ALL 3 LANGUAGES: python, java, cpp - must have all
+
+7. ALSO RETURN brute_force_solution.python (exhaustive, obviously correct, same
+   function signature) and test_generator_code.python (generate_test_case(size='small')
+   returning one random valid stdin string). Expected outputs are computed by
+   running your solution and cross-checked against the brute force."""
         }, indent=2)
         
         try:
@@ -471,25 +588,7 @@ class OpenAIClient:
         Returns:
             Fixed variant dict or None on failure
         """
-        # Group failures by language for clearer prompt
-        failures_by_lang = {}
-        for f in failures:
-            lang = f["language"]
-            if lang not in failures_by_lang:
-                failures_by_lang[lang] = []
-            failures_by_lang[lang].append(f)
-        
-        # Build failure description
-        failure_description = []
-        for lang, lang_failures in failures_by_lang.items():
-            failure_description.append(f"\n=== {lang.upper()} FAILURES ===")
-            for f in lang_failures[:5]:  # Max 5 failures per language
-                failure_description.append(f"""
-Test #{f['index']}:
-  Input: {f['stdin']}
-  Expected: {f['expected']}
-  Actual: {f['actual']}
-  Error: {f.get('error', 'None')}""")
+        failure_description = _describe_failures(failures)
         
         # Build base question context if available
         base_context = ""
@@ -556,15 +655,31 @@ C++:
 {variant.get('stdin_wrappers', {}).get('cpp', 'MISSING')}
 ```
 
-CURRENT TEST_CASES (first 3):
+CURRENT BRUTE_FORCE_SOLUTION (python):
+```python
+{_python_field(variant.get('brute_force_solution')) or 'MISSING'}
+```
+
+CURRENT TEST_GENERATOR_CODE (python):
+```python
+{_python_field(variant.get('test_generator_code')) or 'MISSING'}
+```
+
+CURRENT FUNCTION_TEMPLATE (starter code players receive):
+{json.dumps(variant.get('function_template', {}), indent=2)}
+
+CURRENT TEST_CASES (first 3, inputs only matter):
 {json.dumps(variant.get('test_cases', [])[:3], indent=2)}
 
-ANALYZE: What's the root cause? Solution logic? Wrapper parsing? Wrong expected_stdout?
+ANALYZE: What's the root cause? Which program is wrong according to the problem statement?
 
 Return JSON with ONLY the fields that need fixing:
-{{"solution_code": {{"python": "...", "java": "...", "cpp": "..."}}}} - if solutions wrong
-{{"stdin_wrappers": {{"python": "...", "java": "...", "cpp": "..."}}}} - if parsing wrong
-{{"test_cases": [...]}} - if expected_stdout wrong
+{{"solution_code": {{"python": "...", "java": "...", "cpp": "..."}}}} - if a reference solution is wrong
+{{"stdin_wrappers": {{"python": "...", "java": "...", "cpp": "..."}}}} - if parsing/printing is wrong
+{{"brute_force_solution": {{"python": "..."}}}} - if the brute force is wrong
+{{"test_generator_code": {{"python": "..."}}}} - if the generator is wrong
+{{"function_template": {{"python": "...", "java": "...", "cpp": "..."}}}} - if starter code doesn't fit the wrapper
+{{"problem_statement": "..."}} - only to remove an ambiguity
 
 🔴 CRITICAL REMINDERS:
 - Java: Use BufferedReader, NOT Scanner (causes timeouts)
@@ -604,8 +719,8 @@ Return JSON with ONLY the fields that need fixing:
             
             # Deep merge for nested dicts (solution_code, stdin_wrappers)
             # If LLM only fixes one language, preserve the others
-            for key in ["solution_code", "stdin_wrappers"]:
-                if key in llm_response and llm_response[key]:
+            for key in ["solution_code", "stdin_wrappers", "function_template"]:
+                if isinstance(llm_response.get(key), dict) and llm_response[key]:
                     if key not in fixed_variant:
                         fixed_variant[key] = {}
                     # Merge per-language, not replace entire dict
@@ -613,6 +728,15 @@ Return JSON with ONLY the fields that need fixing:
                         if code:  # Only update if provided
                             fixed_variant[key][lang] = code
             
+            # Single-language helper programs, stored as {"python": code}
+            for key in ["brute_force_solution", "test_generator_code"]:
+                code = _python_field(llm_response.get(key))
+                if code:
+                    fixed_variant[key] = {"python": code}
+
+            if isinstance(llm_response.get("problem_statement"), str) and llm_response["problem_statement"].strip():
+                fixed_variant["problem_statement"] = llm_response["problem_statement"]
+
             # For test_cases - ONLY replace if LLM provides at least 10!
             if "test_cases" in llm_response and llm_response["test_cases"]:
                 new_test_count = len(llm_response["test_cases"])
@@ -642,7 +766,11 @@ Return JSON with ONLY the fields that need fixing:
                 return None
             
             # Log what was changed
-            changed = [k for k in ["solution_code", "stdin_wrappers", "test_cases"] if k in llm_response and llm_response[k]]
+            changed = [
+                k for k in ["solution_code", "stdin_wrappers", "function_template", "brute_force_solution",
+                            "test_generator_code", "test_cases", "problem_statement"]
+                if k in llm_response and llm_response[k]
+            ]
             logger.info(f"     LLM fixed fields: {changed}")
             
             return fixed_variant
