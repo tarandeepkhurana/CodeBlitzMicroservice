@@ -118,6 +118,14 @@ async def start_pool_worker() -> None:
         f"✅ Question pool worker started (target {settings.POOL_TARGET_PER_DIFFICULTY} per difficulty, "
         f"checks every {settings.POOL_CHECK_INTERVAL_SECONDS}s)"
     )
+    status = pool_status()
+    logger.info(
+        "   Pool stock: "
+        + ", ".join(
+            f"{difficulty} {info['ready']}/{status['target_per_difficulty']}"
+            for difficulty, info in status["difficulties"].items()
+        )
+    )
 
 
 async def stop_pool_worker() -> None:
