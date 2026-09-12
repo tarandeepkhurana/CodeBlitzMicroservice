@@ -80,12 +80,15 @@ ALWAYS use BufferedReader:
 
 6. ALL 3 LANGUAGES: python, java, cpp - MUST have all three
 
-7. BRUTE FORCE: also return "brute_force_solution": {"python": "..."}
-   - The SIMPLEST obviously-correct solution: try every possibility (nested loops,
-     all subsets, plain recursion). Speed does not matter, correctness does.
-   - Write it independently of the optimal idea - it is used to cross-check it.
-   - SAME function name and parameters as solution_code.python (the same Python
-     wrapper runs both).
+7. CROSS-CHECK ORACLE: you do NOT write one. A separate request will write a
+   brute-force oracle from your problem_statement ALONE - it never sees your
+   solution_code - and the two must agree on every test and on hundreds of
+   random inputs.
+   => Your problem_statement must define the answer EXACTLY: every edge case,
+      sign convention, tie-break and output format. If a careful reader could
+      implement something different from your solution_code, the question is
+      rejected. Never hide a rule (like "return the absolute value") in the
+      solution only.
 
 8. GENERATOR: also return "test_generator_code": {"python": "..."} defining
      import random
@@ -195,9 +198,6 @@ OUTPUT JSON SCHEMA (REQUIRED STRUCTURE)
     "java": "class Solution {\\n    returnType methodName(params) {\\n        return ...;\\n    }\\n}",
     "cpp": "returnType functionName(params) {\\n    return ...;\\n}"
   },
-  "brute_force_solution": {
-    "python": "def functionName(params):\\n    # simplest exhaustive approach"
-  },
   "test_generator_code": {
     "python": "import random\\n\\ndef generate_test_case(size='small', edge_case=None):\\n    ...\\n    return stdin_string"
   },
@@ -242,7 +242,8 @@ VERIFICATION CHECKLIST (before returning JSON)
 □ Java uses BufferedReader (NOT Scanner)
 □ All wrappers use {user_solution} placeholder
 □ solution_code is correct for all 3 languages
-□ brute_force_solution (python) is exhaustive, obviously correct, same signature
+□ problem_statement alone is enough to implement solution_code exactly (an
+  independent solver reading only the statement must produce the same outputs)
 □ test_generator_code returns valid small stdin strings in the exact test format
 □ Ran solution mentally on test cases - expected_stdout is correct
 □ Exactly 10 test_cases (3 visible, 7 hidden)
@@ -267,8 +268,11 @@ HOW VERIFICATION WORKS (read first)
   brute_mismatch, brute_force_error, generator_error, language_mismatch,
   harness_incompatible (Python wrapper must read input via sys.stdin/input(),
   never open(0)), too_few_random_cases (make 'small' inputs tinier or the
-  brute force faster), template_mismatch (function_template must compile
-  inside the wrapper - players start from it), missing_fields.
+  brute force faster), brute_force_too_slow / reference_too_slow (one input
+  used too much CPU - the brute force is an ORACLE and may use any forbidden
+  operator, e.g. // and %, instead of looping millions of times),
+  template_mismatch (function_template must compile inside the wrapper -
+  players start from it), missing_fields.
 
 ════════════════════════════════════════════════════════════════════════════════
 ⚠️ CRITICAL JAVA ISSUE: SCANNER CAUSES TIMEOUTS! ⚠️
@@ -524,10 +528,10 @@ class OpenAIClient:
 
 6. ALL 3 LANGUAGES: python, java, cpp - must have all
 
-7. ALSO RETURN brute_force_solution.python (exhaustive, obviously correct, same
-   function signature) and test_generator_code.python (generate_test_case(size='small')
+7. ALSO RETURN test_generator_code.python (generate_test_case(size='small')
    returning one random valid stdin string). Expected outputs are computed by
-   running your solution and cross-checked against the brute force."""
+   RUNNING your solution, then cross-checked against an independent oracle
+   written from your problem_statement alone - so the statement must be exact."""
         }, indent=2)
         
         try:
@@ -570,6 +574,100 @@ class OpenAIClient:
             logger.error(f"     ❌ LLM generation failed: {str(e)[:80]}")
             return None
     
+    async def write_verification_helpers(self, variant: dict) -> Optional[dict]:
+        """
+        Write the two helper programs an existing question is missing:
+        a brute-force solution and a random-input generator.
+
+        Used to re-verify questions that were stored before verification
+        existed - much cheaper than regenerating the whole question.
+        """
+        solution = (variant.get("solution_code") or {}).get("python", "")
+        wrapper = (variant.get("stdin_wrappers") or {}).get("python", "")
+        # The oracle must be written from the STATEMENT, not from the reference
+        # solution — otherwise it just copies the reference's behaviour and the
+        # differential check proves nothing. So only the signature is shared.
+        template = (variant.get("function_template") or {}).get("python") or ""
+        signature = next(
+            (line.strip() for line in (template or solution).splitlines()
+             if line.strip().startswith("def ")),
+            "def solution(...):",
+        )
+        sample_inputs = [tc.get("stdin") for tc in (variant.get("test_cases") or [])[:3]]
+
+        prompt = f"""Write two Python helper programs for this existing coding question.
+
+PROBLEM STATEMENT (this is the ONLY definition of correct behaviour):
+{variant.get('problem_statement', '')[:4000]}
+
+REQUIRED FUNCTION SIGNATURE (the same wrapper will call it):
+```python
+{signature}
+```
+
+PYTHON STDIN WRAPPER (shows the exact input/output format):
+```python
+{wrapper}
+```
+
+SAMPLE INPUTS (stdin only):
+{json.dumps(sample_inputs, indent=2)}
+
+Return JSON with exactly these two fields:
+
+{{"brute_force_solution": {{"python": "..."}},
+  "test_generator_code": {{"python": "import random\\n\\ndef generate_test_case(size='small', edge_case=None):\\n    ...\\n    return stdin_string"}}}}
+
+RULES
+- brute_force_solution: the SIMPLEST obviously-correct solution (exhaustive search,
+  nested loops, plain recursion). It MUST have the SAME function name and
+  parameters as the reference solution, because the same wrapper runs it. Write
+  it from the problem statement, independently of the reference solution's idea.
+  It is an ORACLE, not a submission: it MAY use any operator or built-in the
+  problem forbids (e.g. // and % when the statement bans division). It must
+  finish fast (under ~0.5s per input) - never loop millions of times, e.g. no
+  repeated subtraction when values reach 10^9.
+- test_generator_code: generate_test_case(size='small') returns ONE random VALID
+  input as a stdin string in EXACTLY the format the wrapper reads. Keep 'small'
+  tiny (e.g. n <= 8, small value range) so the brute force finishes instantly.
+  Respect every constraint in the statement."""
+
+        try:
+            import time
+            start_time = time.time()
+            response = await self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You write brute-force reference solutions and random input generators for competitive programming questions. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            data = json.loads(response.choices[0].message.content)
+
+            usage = response.usage
+            cost = (usage.prompt_tokens * 0.20 + usage.completion_tokens * 1.25) / 1_000_000 if usage else 0
+            metrics.record_llm_call(cost=cost, duration_ms=elapsed_ms)
+
+            brute = _python_field(data.get("brute_force_solution"))
+            generator = _python_field(data.get("test_generator_code"))
+            if not brute or not generator:
+                logger.error("     ❌ Helper generation missing brute force or generator")
+                return None
+            logger.info(f"     LLM helpers: {elapsed_ms}ms, cost: ${cost:.4f}")
+            return {
+                "brute_force_solution": {"python": brute},
+                "test_generator_code": {"python": generator},
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"     ❌ Failed to parse helper JSON: {str(e)[:50]}")
+            return None
+        except Exception as e:
+            logger.error(f"     ❌ Helper generation failed: {str(e)[:80]}")
+            return None
+
     async def fix_variant(
         self,
         variant: dict,

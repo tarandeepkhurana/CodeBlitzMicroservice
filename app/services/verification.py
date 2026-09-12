@@ -49,6 +49,9 @@ MAX_RANDOM_CASES = 200
 MIN_RANDOM_CASES = 10  # fewer than this is too weak to count as evidence
 # CPU seconds the in-sandbox harness may spend (PISTON kills Python at 3s).
 HARNESS_CPU_BUDGET_S = 2.0
+# CPU seconds any single program run inside the harness may spend. Keeps one
+# slow brute force (e.g. repeated subtraction on 10^9) from killing the run.
+HARNESS_CASE_CPU_LIMIT_S = 0.5
 
 REPORT_VERSION = 1
 
@@ -131,7 +134,7 @@ async def _run_on_inputs(piston, language: str, program: str, inputs: list[str])
 # compact JSON summary.
 
 _HARNESS = r'''
-import io, json, random, sys, time
+import io, json, random, signal, sys, time
 
 REF_SRC = __REF__
 BRUTE_SRC = __BRUTE__
@@ -159,20 +162,43 @@ def same(a, b):
     return norm(a) == norm(b)
 
 
-def run(code, data):
+class CpuTimeout(Exception):
+    pass
+
+
+def _on_cpu_alarm(signum, frame):
+    raise CpuTimeout()
+
+
+try:
+    signal.signal(signal.SIGVTALRM, _on_cpu_alarm)
+    HAVE_TIMER = True
+except (AttributeError, ValueError):
+    HAVE_TIMER = False
+
+
+def run(code, data, cpu_limit=__CASE_LIMIT__):
+    """Run one program with redirected stdin/stdout and its own CPU guard, so a
+    single slow program cannot burn the whole sandbox budget."""
     old_in, old_out = sys.stdin, sys.stdout
     buf = io.BytesIO()
     out = io.TextIOWrapper(buf, encoding="utf-8", write_through=True)
     sys.stdin = io.TextIOWrapper(io.BytesIO(data.encode("utf-8")), encoding="utf-8")
     sys.stdout = out
     err = None
+    if HAVE_TIMER:
+        signal.setitimer(signal.ITIMER_VIRTUAL, cpu_limit)
     try:
         exec(code, {"__name__": "__main__", "__builtins__": __builtins__})
     except SystemExit:
         pass
+    except CpuTimeout:
+        err = "TIMEOUT: used more than %.1fs CPU on one input" % cpu_limit
     except BaseException as e:
         err = clip(type(e).__name__ + ": " + str(e), 120)
     finally:
+        if HAVE_TIMER:
+            signal.setitimer(signal.ITIMER_VIRTUAL, 0)
         try:
             out.flush()
         except Exception:
@@ -267,6 +293,7 @@ def _build_harness(ref_program: str, brute_program: str, generator: str,
         .replace("__TRUTH__", repr(truth))
         .replace("__MAX_RANDOM__", str(MAX_RANDOM_CASES))
         .replace("__BUDGET__", str(HARNESS_CPU_BUDGET_S))
+        .replace("__CASE_LIMIT__", str(HARNESS_CASE_CPU_LIMIT_S))
     )
 
 
@@ -386,7 +413,9 @@ async def verify_variant(variant: dict) -> VerificationOutcome:
         for m in diff["test_mismatches"] + diff["random_mismatches"]:
             failures.append({"kind": "brute_mismatch", **m})
         for e in diff["errors"]:
-            failures.append({"kind": f"{e.get('where', 'unknown')}_error", **e})
+            where = e.get("where", "unknown")
+            too_slow = "TIMEOUT" in str(e.get("error", ""))
+            failures.append({"kind": f"{where}_too_slow" if too_slow else f"{where}_error", **e})
         if not diff["errors"] and diff["random"] < MIN_RANDOM_CASES:
             failures.append({"kind": "too_few_random_cases", "checked": diff["random"],
                              "stopped": diff.get("stopped")})

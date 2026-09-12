@@ -381,6 +381,19 @@ class VariantService:
             logger.info(f"         ✓ Generated with {len(variant_data.get('test_cases', []))} test cases")
             dump(f"gen{gen_attempt + 1}", variant_data)
 
+            # Independent oracle: written from the problem statement alone, so
+            # agreement between it and solution_code is real evidence (if the
+            # same call wrote both, they could share the same misreading).
+            logger.info("         Writing independent cross-check oracle...")
+            helpers = await self.openai.write_verification_helpers(variant_data)
+            llm_rounds += 1
+            if not helpers:
+                logger.warning("         ✗ Could not write the oracle")
+                continue
+            variant_data["brute_force_solution"] = helpers["brute_force_solution"]
+            if not python_code(variant_data.get("test_generator_code")):
+                variant_data["test_generator_code"] = helpers["test_generator_code"]
+
             logger.info("[STEP 6] Verifying via PISTON (truth, brute force, 3 languages)...")
             outcome = await verify_variant(variant_data)
 
@@ -392,6 +405,23 @@ class VariantService:
                 dump(f"gen{gen_attempt + 1}_fix{fix_attempt - 1}_failures", outcome.failures)
                 kinds = sorted({f.get("kind", "?") for f in outcome.failures})
                 logger.warning(f"         ✗ Verification failed ({len(outcome.failures)} failures: {kinds})")
+                # A problem with the oracle itself (too slow, crashed, weak
+                # generator) is repaired by rewriting it from the statement
+                # alone — never by showing it the reference solution.
+                oracle_kinds = {"brute_force_too_slow", "brute_force_error",
+                                "generator_error", "too_few_random_cases"}
+                if kinds and set(kinds) <= oracle_kinds:
+                    logger.info(f"         Rewriting the oracle ({fix_attempt}/{self.MAX_FIX_ATTEMPTS})...")
+                    helpers = await self.openai.write_verification_helpers(current_variant)
+                    llm_rounds += 1
+                    if not helpers:
+                        metrics.record_fix_attempt(success=False)
+                        break
+                    current_variant = {**current_variant, **helpers}
+                    outcome = await verify_variant(current_variant)
+                    metrics.record_fix_attempt(success=outcome.success)
+                    continue
+
                 logger.info(f"         Sending failures to LLM for fix ({fix_attempt}/{self.MAX_FIX_ATTEMPTS})...")
 
                 fixed_variant = await self.openai.fix_variant(
@@ -618,6 +648,46 @@ class VariantService:
             "stdin_wrappers": stdin_wrappers
         }
     
+    async def generate_for_pool(self, difficulty: str) -> VariantResult:
+        """
+        Generate one verified variant for the question pool.
+
+        No users involved: the base question is chosen from the ones with the
+        fewest variants so far, so the pool spreads across topics instead of
+        piling up variants of the same question.
+        """
+        from app.services.pool import POOL_RATING
+
+        rating = POOL_RATING.get(difficulty, 1400)
+        start_time = time.time()
+
+        base_questions = self.db.get_base_questions_by_difficulty(difficulty=difficulty, limit=10)
+        if not base_questions:
+            return VariantResult(success=False, error=f"No base questions for difficulty {difficulty}")
+
+        # Prefer base questions that have produced the fewest variants
+        variant_counts = self.db.count_variants_by_base_question()
+        base_questions.sort(key=lambda q: variant_counts.get(q["id"], 0))
+
+        for base_question in base_questions[:self.MAX_GENERATION_ATTEMPTS]:
+            logger.info(f"[POOL] Generating {difficulty} variant from: \"{base_question['title'][:40]}\"")
+            result = await self._generate_and_verify_variant(
+                base_question=base_question,
+                user1_rating=rating,
+                user2_rating=rating,
+            )
+            if result.success:
+                result.generation_time_ms = int((time.time() - start_time) * 1000)
+                metrics.record_generation_success()
+                return result
+            metrics.record_generation_failure("pool_generation_failed")
+
+        return VariantResult(
+            success=False,
+            generation_time_ms=int((time.time() - start_time) * 1000),
+            error=f"Could not generate a verified {difficulty} variant",
+        )
+
     def _get_target_difficulty(self, avg_rating: float) -> str:
         """Map average rating to difficulty."""
         if avg_rating < 1200:

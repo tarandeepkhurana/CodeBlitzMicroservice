@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api.routes import health, question, metrics
+from app.api.routes import health, question, metrics, pool
 from app.clients.piston_client import get_piston_client, close_piston_client
 from app.core import (
     get_rate_limiter,
@@ -78,7 +78,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to connect to PISTON: {e}")
     
+    # Keep the verified-question pool stocked in the background
+    from app.services.pool import start_pool_worker, stop_pool_worker
+    await start_pool_worker()
+
     yield
+
+    await stop_pool_worker()
     
     # Shutdown
     logger.info("Shutting down...")
@@ -186,6 +192,7 @@ logger.info("✅ Error handling middleware enabled")
 app.include_router(health.router)
 app.include_router(question.router)
 app.include_router(metrics.router)
+app.include_router(pool.router)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

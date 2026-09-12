@@ -259,6 +259,72 @@ class SupabaseClient:
             logger.error(f"Error getting cached variant: {e}")
             return None
     
+    def count_validated_variants_by_difficulty(self) -> dict:
+        """
+        Pool stock per difficulty: only variants carrying a verification report
+        count, because only those can be served to players.
+        """
+        try:
+            response = self.client.table("question_variants")\
+                .select("effective_difficulty, test_generator_code")\
+                .eq("validation_status", "validated")\
+                .execute()
+
+            counts: dict = {}
+            for row in response.data or []:
+                generator = row.get("test_generator_code") or {}
+                if not isinstance(generator, dict) or not generator.get("verification_report"):
+                    continue  # legacy variant, not verified by the current pipeline
+                difficulty = row.get("effective_difficulty")
+                if difficulty:
+                    counts[difficulty] = counts.get(difficulty, 0) + 1
+            return counts
+        except Exception as e:
+            logger.error(f"Error counting validated variants: {e}")
+            return {}
+
+    def count_variants_by_base_question(self) -> dict:
+        """How many validated variants exist per base question (to spread the pool out)."""
+        try:
+            response = self.client.table("question_variants")\
+                .select("base_question_id")\
+                .eq("validation_status", "validated")\
+                .execute()
+
+            counts: dict = {}
+            for row in response.data or []:
+                base_id = row.get("base_question_id")
+                if base_id:
+                    counts[base_id] = counts.get(base_id, 0) + 1
+            return counts
+        except Exception as e:
+            logger.error(f"Error counting variants per base question: {e}")
+            return {}
+
+    def get_variants(self, validation_status: Optional[str] = None, limit: int = 100) -> list[dict]:
+        """Fetch stored variants (used when re-verifying existing questions)."""
+        try:
+            query = self.client.table("question_variants").select("*")
+            if validation_status:
+                query = query.eq("validation_status", validation_status)
+            response = query.limit(limit).execute()
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error fetching variants: {e}")
+            return []
+
+    def update_variant(self, variant_id: str, fields: dict) -> bool:
+        """Update one variant row (e.g. after re-verification)."""
+        try:
+            self.client.table("question_variants")\
+                .update(fields)\
+                .eq("id", variant_id)\
+                .execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating variant {variant_id}: {e}")
+            return False
+
     def find_variant_by_hash(self, variant_hash: str) -> Optional[dict]:
         """Find variant by hash for deduplication."""
         try:
