@@ -101,7 +101,16 @@ ALWAYS use BufferedReader:
      so the brute force finishes instantly. Respect EVERY constraint
      (sortedness, uniqueness, ranges, guaranteed-answer promises...).
 
-9. expected_stdout in test_cases is only YOUR PREDICTION. The real expected
+9. IT MUST BE A DIFFERENT PROBLEM, NOT A RENAME
+   - The base question's OWN solution is run against YOUR test cases. If it still
+     passes them all, your variant is thrown away.
+   - Renaming the function, relabelling values (e.g. digits 1-9 -> 0-8), swapping
+     the story or rewording the statement does NOT count.
+   - Change a RULE instead: what must be returned, which inputs are valid, an
+     extra condition to satisfy, a tie-break, or tighter limits that force a
+     better algorithm.
+
+10. expected_stdout in test_cases is only YOUR PREDICTION. The real expected
    outputs are computed by EXECUTING your solution_code, which is then
    cross-checked against brute_force_solution on hundreds of random inputs
    and against the Java/C++ solutions. A wrong solution gets the question
@@ -574,6 +583,83 @@ class OpenAIClient:
             logger.error(f"     ❌ LLM generation failed: {str(e)[:80]}")
             return None
     
+    async def judge_hardness(self, base_question: dict, variant: dict, facts: dict) -> Optional[dict]:
+        """
+        Ask the model whether a variant is a meaningfully different question or
+        just a relabelling of the base one.
+
+        This is a MODEL JUDGEMENT, not a proof. It is recorded separately from
+        the machine-checked evidence and is only used to reject relabellings.
+        """
+        check = facts.get("base_solution_check", {})
+        prompt = f"""Decide whether the VARIANT below is a meaningfully different programming
+question from the BASE question, or just the same question relabelled.
+
+BASE QUESTION: {base_question.get('title')} ({base_question.get('difficulty')})
+{(base_question.get('problem_statement') or '')[:2500]}
+
+VARIANT: {variant.get('title')}
+{(variant.get('problem_statement') or '')[:2500]}
+
+MACHINE-CHECKED FACTS:
+- Running the BASE question's own solution against the VARIANT's tests:
+  {check.get('passed', 0)} passed, {check.get('failed', 0)} wrong, {check.get('errored', 0)} crashed
+- Expected time complexity: {base_question.get('expected_time_complexity')} -> {variant.get('expected_time_complexity')}
+
+COUNT AS "relabelled" (reject) when the solver does essentially the same work:
+- renaming the function, variables or the story (robot -> turtle)
+- relabelling the symbols or alphabet (digits 1-9 -> 0-8, letters -> numbers)
+- flipping an arbitrary convention with no new reasoning (ascending -> descending)
+- reformatting input or output only
+
+COUNT AS "meaningful" (accept) when a solver must think differently:
+- a new rule or constraint that changes the algorithm or its edge cases
+- a different quantity to compute
+- tighter limits that force a better time complexity
+- combining the base problem with an extra requirement
+
+Return JSON only:
+{{"verdict": "meaningful" | "relabelled",
+  "harder_than_base": true | false,
+  "reason": "one short sentence"}}"""
+
+        try:
+            import time
+            start_time = time.time()
+            response = await self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You judge whether a coding question is genuinely different from another one. Be strict: relabelling is not a new question. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            data = json.loads(response.choices[0].message.content)
+
+            usage = response.usage
+            cost = (usage.prompt_tokens * 0.20 + usage.completion_tokens * 1.25) / 1_000_000 if usage else 0
+            metrics.record_llm_call(cost=cost, duration_ms=elapsed_ms)
+
+            verdict = str(data.get("verdict", "")).lower()
+            if verdict not in ("meaningful", "relabelled"):
+                logger.warning(f"     ⚠️ Judge returned an unusable verdict: {verdict!r}")
+                return None
+            logger.info(f"     LLM judge: {verdict} ({elapsed_ms}ms, ${cost:.4f})")
+            return {
+                "verdict": verdict,
+                "harder_than_base": bool(data.get("harder_than_base")),
+                "reason": str(data.get("reason", ""))[:300],
+                "note": "model judgement, not a machine-checked proof",
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"     ❌ Failed to parse judge JSON: {str(e)[:50]}")
+            return None
+        except Exception as e:
+            logger.error(f"     ❌ Hardness judge failed: {str(e)[:80]}")
+            return None
+
     async def write_verification_helpers(self, variant: dict) -> Optional[dict]:
         """
         Write the two helper programs an existing question is missing:

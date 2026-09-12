@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from app.clients.openai_client import get_openai_client
 from app.clients.supabase_client import get_supabase_client
+from app.services.hardness import assess_hardness
 from app.services.verification import verify_variant, python_code
 from app.config import settings
 from app.core import get_metrics
@@ -449,8 +450,23 @@ class VariantService:
 
             if outcome.success:
                 logger.info("         ✓ Verification passed")
+
+                # Correct is not enough: it must also be a genuinely different,
+                # harder question than the base one.
+                logger.info("[STEP 6b] Checking it is actually a new question...")
+                hardness = await assess_hardness(outcome.variant, base_question)
+                if hardness.cosmetic:
+                    logger.warning(f"         ✗ Rejected as cosmetic: {hardness.reason}")
+                    metrics.record_generation_failure("cosmetic_variant")
+                    continue  # regenerate instead of storing a reworded clone
+
+                logger.info(
+                    f"         ✓ Hardness +{hardness.delta} "
+                    f"(score {hardness.details.get('difficulty_score')}): "
+                    f"{[e['claim'] for e in hardness.evidence]}"
+                )
                 store_result = await self._store_and_return_variant(
-                    outcome.variant, base_question, outcome.report, llm_rounds
+                    outcome.variant, base_question, outcome.report, llm_rounds, hardness
                 )
                 if store_result.success:
                     return store_result
@@ -466,7 +482,8 @@ class VariantService:
         variant_data: dict,
         base_question: dict,
         report: dict,
-        llm_rounds: int
+        llm_rounds: int,
+        hardness=None
     ) -> VariantResult:
         """Store a verified variant (exactly as verified) and return result."""
         # VALIDATION: Ensure we have at least 10 test cases
@@ -480,8 +497,9 @@ class VariantService:
             variant_data=variant_data,
             base_question_id=base_question["id"],
             base_difficulty=base_question["difficulty"],
-            report=report,
-            llm_rounds=llm_rounds
+            report={**report, "hardness": hardness.report()} if hardness else report,
+            llm_rounds=llm_rounds,
+            difficulty_delta=hardness.delta if hardness else 0
         )
         
         if stored:
@@ -503,7 +521,8 @@ class VariantService:
         base_question_id: str,
         base_difficulty: str,
         report: dict,
-        llm_rounds: int
+        llm_rounds: int,
+        difficulty_delta: int = 0
     ) -> Optional[dict]:
         """Store validated variant in database."""
         try:
@@ -539,7 +558,7 @@ class VariantService:
                 title=variant_data.get("title"),
                 problem_statement=variant_data.get("problem_statement"),
                 effective_difficulty=base_difficulty,
-                difficulty_delta=0,
+                difficulty_delta=difficulty_delta,
                 input_format=variant_data.get("input_format"),
                 output_format=variant_data.get("output_format"),
                 constraints=variant_data.get("constraints"),
