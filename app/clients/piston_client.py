@@ -242,6 +242,16 @@ class PistonClient:
             run_code = run_result.get("code")
             run_status = run_result.get("status")
             
+            # Output larger than PISTON's output_max_size (process gets killed)
+            if run_status in ("OL", "EL"):
+                return ExecutionResult(
+                    success=False,
+                    stdout=run_result.get("stdout", "").strip(),
+                    stderr="Output limit exceeded",
+                    exit_code=-1,
+                    error_message="Output limit exceeded (PISTON output_max_size)"
+                )
+
             # Handle runtime timeout
             if run_status == "TO":
                 return ExecutionResult(

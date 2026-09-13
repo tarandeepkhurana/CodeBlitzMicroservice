@@ -80,6 +80,42 @@ ALWAYS use BufferedReader:
 
 6. ALL 3 LANGUAGES: python, java, cpp - MUST have all three
 
+7. CROSS-CHECK ORACLE: you do NOT write one. A separate request will write a
+   brute-force oracle from your problem_statement ALONE - it never sees your
+   solution_code - and the two must agree on every test and on hundreds of
+   random inputs.
+   => Your problem_statement must define the answer EXACTLY: every edge case,
+      sign convention, tie-break and output format. If a careful reader could
+      implement something different from your solution_code, the question is
+      rejected. Never hide a rule (like "return the absolute value") in the
+      solution only.
+
+8. GENERATOR: also return "test_generator_code": {"python": "..."} defining
+     import random
+     def generate_test_case(size='small', edge_case=None):
+         ...
+         return stdin_string
+   - Returns ONE random VALID input as a stdin string, in exactly the test_cases
+     stdin format. Use the `random` module (it is seeded for you).
+   - size='small' means tiny inputs (e.g. n <= 8, values within about -10..10)
+     so the brute force finishes instantly. Respect EVERY constraint
+     (sortedness, uniqueness, ranges, guaranteed-answer promises...).
+
+9. IT MUST BE A DIFFERENT PROBLEM, NOT A RENAME
+   - The base question's OWN solution is run against YOUR test cases. If it still
+     passes them all, your variant is thrown away.
+   - Renaming the function, relabelling values (e.g. digits 1-9 -> 0-8), swapping
+     the story or rewording the statement does NOT count.
+   - Change a RULE instead: what must be returned, which inputs are valid, an
+     extra condition to satisfy, a tie-break, or tighter limits that force a
+     better algorithm.
+
+10. expected_stdout in test_cases is only YOUR PREDICTION. The real expected
+   outputs are computed by EXECUTING your solution_code, which is then
+   cross-checked against brute_force_solution on hundreds of random inputs
+   and against the Java/C++ solutions. A wrong solution gets the question
+   rejected - make solution_code exactly match the problem statement.
+
 ════════════════════════════════════════════════════════════════════════════════
 WORKING EXAMPLE 1: Single Array Input → Integer Output
 ════════════════════════════════════════════════════════════════════════════════
@@ -171,9 +207,13 @@ OUTPUT JSON SCHEMA (REQUIRED STRUCTURE)
     "java": "class Solution {\\n    returnType methodName(params) {\\n        return ...;\\n    }\\n}",
     "cpp": "returnType functionName(params) {\\n    return ...;\\n}"
   },
+  "test_generator_code": {
+    "python": "import random\\n\\ndef generate_test_case(size='small', edge_case=None):\\n    ...\\n    return stdin_string"
+  },
+  "edge_case_types": ["empty_input", "single_element", "duplicates", "..."],
   "solution_explanation": "Algorithm description",
-  "expected_time_complexity": "O(n)",
-  "expected_space_complexity": "O(1)",
+  "expected_time_complexity": "O(n)",    // ⚠️ MUST be from STANDARD LIST below!
+  "expected_space_complexity": "O(1)",   // ⚠️ MUST be from STANDARD LIST below!
   "test_cases": [
     {"stdin": "...", "expected_stdout": "...", "is_hidden": false},
     {"stdin": "...", "expected_stdout": "...", "is_hidden": false},
@@ -189,6 +229,21 @@ OUTPUT JSON SCHEMA (REQUIRED STRUCTURE)
 }
 
 ════════════════════════════════════════════════════════════════════════════════
+⚠️ COMPLEXITY VALUES - USE ONLY THESE EXACT STRINGS
+════════════════════════════════════════════════════════════════════════════════
+Pick expected_time_complexity and expected_space_complexity ONLY from this list:
+  "O(1)", "O(1)*", "O(log n)", "O(log²n)", "O(log³n)", "O(√n)", "O(n)",
+  "O(n log log n)", "O(n log n)", "O(n+m)", "O(min(n,m))", "O(n*m)",
+  "O((V+E)log V)", "O(n log k)", "O(n²)", "O(n² log n)", "O(n³)",
+  "O(V+E)", "O(2^n)", "O(n!)", "O(n!/(k!(n-k)!))", "O(recursive)"
+
+DO NOT write verbose descriptions like "O(n) where n is array length"!
+DO NOT invent new complexity notations!
+Just pick the closest standard notation from the list above.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════════════════════
 VERIFICATION CHECKLIST (before returning JSON)
 ════════════════════════════════════════════════════════════════════════════════
 □ stdin format matches base_question.test_cases_sample exactly
@@ -196,6 +251,9 @@ VERIFICATION CHECKLIST (before returning JSON)
 □ Java uses BufferedReader (NOT Scanner)
 □ All wrappers use {user_solution} placeholder
 □ solution_code is correct for all 3 languages
+□ problem_statement alone is enough to implement solution_code exactly (an
+  independent solver reading only the statement must produce the same outputs)
+□ test_generator_code returns valid small stdin strings in the exact test format
 □ Ran solution mentally on test cases - expected_stdout is correct
 □ Exactly 10 test_cases (3 visible, 7 hidden)
 □ Output format matches (lowercase "true"/"false" for boolean, space-separated for arrays)
@@ -203,6 +261,27 @@ VERIFICATION CHECKLIST (before returning JSON)
 
 # Fix prompt for when verification fails
 FIX_VARIANT_SYSTEM_PROMPT = """You fix coding problem variants that failed PISTON execution verification.
+
+════════════════════════════════════════════════════════════════════════════════
+HOW VERIFICATION WORKS (read first)
+════════════════════════════════════════════════════════════════════════════════
+- Expected outputs are COMPUTED by running solution_code.python on each test
+  input. You cannot fix anything by editing expected_stdout - it is ignored.
+- brute_force_solution.python must print the same output as solution_code.python
+  on every test and on random inputs from test_generator_code. When they
+  disagree, re-read the problem statement and decide which one is wrong; fix
+  that one (or make the statement unambiguous if both readings are plausible).
+- solution_code.java and solution_code.cpp must print EXACTLY what Python
+  prints (same format, same spacing, lowercase true/false).
+- Failure kinds you may see: reference_error (Python solution crashed),
+  brute_mismatch, brute_force_error, generator_error, language_mismatch,
+  harness_incompatible (Python wrapper must read input via sys.stdin/input(),
+  never open(0)), too_few_random_cases (make 'small' inputs tinier or the
+  brute force faster), brute_force_too_slow / reference_too_slow (one input
+  used too much CPU - the brute force is an ORACLE and may use any forbidden
+  operator, e.g. // and %, instead of looping millions of times),
+  template_mismatch (function_template must compile inside the wrapper -
+  players start from it), missing_fields.
 
 ════════════════════════════════════════════════════════════════════════════════
 ⚠️ CRITICAL JAVA ISSUE: SCANNER CAUSES TIMEOUTS! ⚠️
@@ -301,13 +380,59 @@ RETURN FORMAT
 Return JSON with ONLY the fields that need fixing:
 
 {"solution_code": {"python": "...", "java": "...", "cpp": "..."}}
-OR
 {"stdin_wrappers": {"python": "...", "java": "...", "cpp": "..."}}
-OR
-{"test_cases": [exactly 10 test cases with stdin/expected_stdout/is_hidden]}
-OR combination of above
+{"brute_force_solution": {"python": "..."}}
+{"test_generator_code": {"python": "..."}}
+{"function_template": {"python": "...", "java": "...", "cpp": "..."}}
+{"test_cases": [at least 10 test cases - only if some INPUTS are invalid]}
+{"problem_statement": "..."}  (only to remove an ambiguity)
+OR any combination of the above
 
 DO NOT return fields that are working correctly."""
+
+
+def _python_field(value) -> Optional[str]:
+    """Code from a {"python": code} field or a plain string."""
+    if isinstance(value, dict):
+        value = value.get("python")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _describe_failures(failures: list[dict], max_items: int = 10) -> str:
+    """Render verification failures (see app/services/verification.py) for the fix prompt."""
+    lines = []
+    for f in failures[:max_items]:
+        kind = f.get("kind", "unknown")
+        where = f"test #{f['index']}" if "index" in f else (
+            f"test #{f['test']}" if "test" in f else (f"random input (seed {f['seed']})" if "seed" in f else ""))
+        if kind == "brute_mismatch":
+            lines.append(
+                f"- brute_mismatch on {where}: solution_code.python and brute_force_solution disagree.\n"
+                f"    Input: {f.get('stdin')!r}\n    solution_code.python printed: {f.get('reference')!r}\n"
+                f"    brute_force_solution printed: {f.get('brute_force')!r}")
+        elif kind == "language_mismatch":
+            lines.append(
+                f"- language_mismatch: {f.get('language', '').upper()} differs from Python on {where}.\n"
+                f"    Input: {f.get('stdin')!r}\n    Python printed: {f.get('expected')!r}\n"
+                f"    {f.get('language')} printed: {f.get('actual')!r}\n    Error: {f.get('error') or 'none'}")
+        elif kind == "missing_fields":
+            lines.append(f"- missing_fields: {f.get('detail')}")
+        elif kind == "template_mismatch":
+            lang = f.get("language")
+            lines.append(
+                f"- template_mismatch: function_template.{lang} does not compile inside stdin_wrappers.{lang} "
+                f"(players start from this template). Make them agree: same function/method name, "
+                f"static-ness, parameter and return types.\n    Error: {f.get('error')}")
+        elif kind == "harness_incompatible":
+            lines.append("- harness_incompatible: the Python wrapper must read input via sys.stdin / input() (not open(0)).")
+        elif kind == "too_few_random_cases":
+            lines.append(f"- too_few_random_cases: only {f.get('checked')} random inputs checked "
+                         f"({f.get('stopped')}); make size='small' inputs tinier or the brute force faster.")
+        else:
+            lines.append(f"- {kind} {where}: input {f.get('stdin')!r} error: {f.get('error')}")
+    if len(failures) > max_items:
+        lines.append(f"- ... and {len(failures) - max_items} more failures")
+    return "\n".join(lines)
 
 
 class OpenAIClient:
@@ -410,7 +535,12 @@ class OpenAIClient:
 
 5. PLACEHOLDER: Use {user_solution} in all wrappers
 
-6. ALL 3 LANGUAGES: python, java, cpp - must have all"""
+6. ALL 3 LANGUAGES: python, java, cpp - must have all
+
+7. ALSO RETURN test_generator_code.python (generate_test_case(size='small')
+   returning one random valid stdin string). Expected outputs are computed by
+   RUNNING your solution, then cross-checked against an independent oracle
+   written from your problem_statement alone - so the statement must be exact."""
         }, indent=2)
         
         try:
@@ -453,6 +583,177 @@ class OpenAIClient:
             logger.error(f"     ❌ LLM generation failed: {str(e)[:80]}")
             return None
     
+    async def judge_hardness(self, base_question: dict, variant: dict, facts: dict) -> Optional[dict]:
+        """
+        Ask the model whether a variant is a meaningfully different question or
+        just a relabelling of the base one.
+
+        This is a MODEL JUDGEMENT, not a proof. It is recorded separately from
+        the machine-checked evidence and is only used to reject relabellings.
+        """
+        check = facts.get("base_solution_check", {})
+        prompt = f"""Decide whether the VARIANT below is a meaningfully different programming
+question from the BASE question, or just the same question relabelled.
+
+BASE QUESTION: {base_question.get('title')} ({base_question.get('difficulty')})
+{(base_question.get('problem_statement') or '')[:2500]}
+
+VARIANT: {variant.get('title')}
+{(variant.get('problem_statement') or '')[:2500]}
+
+MACHINE-CHECKED FACTS:
+- Running the BASE question's own solution against the VARIANT's tests:
+  {check.get('passed', 0)} passed, {check.get('failed', 0)} wrong, {check.get('errored', 0)} crashed
+- Expected time complexity: {base_question.get('expected_time_complexity')} -> {variant.get('expected_time_complexity')}
+
+COUNT AS "relabelled" (reject) when the solver does essentially the same work:
+- renaming the function, variables or the story (robot -> turtle)
+- relabelling the symbols or alphabet (digits 1-9 -> 0-8, letters -> numbers)
+- flipping an arbitrary convention with no new reasoning (ascending -> descending)
+- reformatting input or output only
+
+COUNT AS "meaningful" (accept) when a solver must think differently:
+- a new rule or constraint that changes the algorithm or its edge cases
+- a different quantity to compute
+- tighter limits that force a better time complexity
+- combining the base problem with an extra requirement
+
+Return JSON only:
+{{"verdict": "meaningful" | "relabelled",
+  "harder_than_base": true | false,
+  "reason": "one short sentence"}}"""
+
+        try:
+            import time
+            start_time = time.time()
+            response = await self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You judge whether a coding question is genuinely different from another one. Be strict: relabelling is not a new question. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            data = json.loads(response.choices[0].message.content)
+
+            usage = response.usage
+            cost = (usage.prompt_tokens * 0.20 + usage.completion_tokens * 1.25) / 1_000_000 if usage else 0
+            metrics.record_llm_call(cost=cost, duration_ms=elapsed_ms)
+
+            verdict = str(data.get("verdict", "")).lower()
+            if verdict not in ("meaningful", "relabelled"):
+                logger.warning(f"     ⚠️ Judge returned an unusable verdict: {verdict!r}")
+                return None
+            logger.info(f"     LLM judge: {verdict} ({elapsed_ms}ms, ${cost:.4f})")
+            return {
+                "verdict": verdict,
+                "harder_than_base": bool(data.get("harder_than_base")),
+                "reason": str(data.get("reason", ""))[:300],
+                "note": "model judgement, not a machine-checked proof",
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"     ❌ Failed to parse judge JSON: {str(e)[:50]}")
+            return None
+        except Exception as e:
+            logger.error(f"     ❌ Hardness judge failed: {str(e)[:80]}")
+            return None
+
+    async def write_verification_helpers(self, variant: dict) -> Optional[dict]:
+        """
+        Write the two helper programs an existing question is missing:
+        a brute-force solution and a random-input generator.
+
+        Used to re-verify questions that were stored before verification
+        existed - much cheaper than regenerating the whole question.
+        """
+        solution = (variant.get("solution_code") or {}).get("python", "")
+        wrapper = (variant.get("stdin_wrappers") or {}).get("python", "")
+        # The oracle must be written from the STATEMENT, not from the reference
+        # solution — otherwise it just copies the reference's behaviour and the
+        # differential check proves nothing. So only the signature is shared.
+        template = (variant.get("function_template") or {}).get("python") or ""
+        signature = next(
+            (line.strip() for line in (template or solution).splitlines()
+             if line.strip().startswith("def ")),
+            "def solution(...):",
+        )
+        sample_inputs = [tc.get("stdin") for tc in (variant.get("test_cases") or [])[:3]]
+
+        prompt = f"""Write two Python helper programs for this existing coding question.
+
+PROBLEM STATEMENT (this is the ONLY definition of correct behaviour):
+{variant.get('problem_statement', '')[:4000]}
+
+REQUIRED FUNCTION SIGNATURE (the same wrapper will call it):
+```python
+{signature}
+```
+
+PYTHON STDIN WRAPPER (shows the exact input/output format):
+```python
+{wrapper}
+```
+
+SAMPLE INPUTS (stdin only):
+{json.dumps(sample_inputs, indent=2)}
+
+Return JSON with exactly these two fields:
+
+{{"brute_force_solution": {{"python": "..."}},
+  "test_generator_code": {{"python": "import random\\n\\ndef generate_test_case(size='small', edge_case=None):\\n    ...\\n    return stdin_string"}}}}
+
+RULES
+- brute_force_solution: the SIMPLEST obviously-correct solution (exhaustive search,
+  nested loops, plain recursion). It MUST have the SAME function name and
+  parameters as the reference solution, because the same wrapper runs it. Write
+  it from the problem statement, independently of the reference solution's idea.
+  It is an ORACLE, not a submission: it MAY use any operator or built-in the
+  problem forbids (e.g. // and % when the statement bans division). It must
+  finish fast (under ~0.5s per input) - never loop millions of times, e.g. no
+  repeated subtraction when values reach 10^9.
+- test_generator_code: generate_test_case(size='small') returns ONE random VALID
+  input as a stdin string in EXACTLY the format the wrapper reads. Keep 'small'
+  tiny (e.g. n <= 8, small value range) so the brute force finishes instantly.
+  Respect every constraint in the statement."""
+
+        try:
+            import time
+            start_time = time.time()
+            response = await self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You write brute-force reference solutions and random input generators for competitive programming questions. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            data = json.loads(response.choices[0].message.content)
+
+            usage = response.usage
+            cost = (usage.prompt_tokens * 0.20 + usage.completion_tokens * 1.25) / 1_000_000 if usage else 0
+            metrics.record_llm_call(cost=cost, duration_ms=elapsed_ms)
+
+            brute = _python_field(data.get("brute_force_solution"))
+            generator = _python_field(data.get("test_generator_code"))
+            if not brute or not generator:
+                logger.error("     ❌ Helper generation missing brute force or generator")
+                return None
+            logger.info(f"     LLM helpers: {elapsed_ms}ms, cost: ${cost:.4f}")
+            return {
+                "brute_force_solution": {"python": brute},
+                "test_generator_code": {"python": generator},
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"     ❌ Failed to parse helper JSON: {str(e)[:50]}")
+            return None
+        except Exception as e:
+            logger.error(f"     ❌ Helper generation failed: {str(e)[:80]}")
+            return None
+
     async def fix_variant(
         self,
         variant: dict,
@@ -471,25 +772,7 @@ class OpenAIClient:
         Returns:
             Fixed variant dict or None on failure
         """
-        # Group failures by language for clearer prompt
-        failures_by_lang = {}
-        for f in failures:
-            lang = f["language"]
-            if lang not in failures_by_lang:
-                failures_by_lang[lang] = []
-            failures_by_lang[lang].append(f)
-        
-        # Build failure description
-        failure_description = []
-        for lang, lang_failures in failures_by_lang.items():
-            failure_description.append(f"\n=== {lang.upper()} FAILURES ===")
-            for f in lang_failures[:5]:  # Max 5 failures per language
-                failure_description.append(f"""
-Test #{f['index']}:
-  Input: {f['stdin']}
-  Expected: {f['expected']}
-  Actual: {f['actual']}
-  Error: {f.get('error', 'None')}""")
+        failure_description = _describe_failures(failures)
         
         # Build base question context if available
         base_context = ""
@@ -556,15 +839,31 @@ C++:
 {variant.get('stdin_wrappers', {}).get('cpp', 'MISSING')}
 ```
 
-CURRENT TEST_CASES (first 3):
+CURRENT BRUTE_FORCE_SOLUTION (python):
+```python
+{_python_field(variant.get('brute_force_solution')) or 'MISSING'}
+```
+
+CURRENT TEST_GENERATOR_CODE (python):
+```python
+{_python_field(variant.get('test_generator_code')) or 'MISSING'}
+```
+
+CURRENT FUNCTION_TEMPLATE (starter code players receive):
+{json.dumps(variant.get('function_template', {}), indent=2)}
+
+CURRENT TEST_CASES (first 3, inputs only matter):
 {json.dumps(variant.get('test_cases', [])[:3], indent=2)}
 
-ANALYZE: What's the root cause? Solution logic? Wrapper parsing? Wrong expected_stdout?
+ANALYZE: What's the root cause? Which program is wrong according to the problem statement?
 
 Return JSON with ONLY the fields that need fixing:
-{{"solution_code": {{"python": "...", "java": "...", "cpp": "..."}}}} - if solutions wrong
-{{"stdin_wrappers": {{"python": "...", "java": "...", "cpp": "..."}}}} - if parsing wrong
-{{"test_cases": [...]}} - if expected_stdout wrong
+{{"solution_code": {{"python": "...", "java": "...", "cpp": "..."}}}} - if a reference solution is wrong
+{{"stdin_wrappers": {{"python": "...", "java": "...", "cpp": "..."}}}} - if parsing/printing is wrong
+{{"brute_force_solution": {{"python": "..."}}}} - if the brute force is wrong
+{{"test_generator_code": {{"python": "..."}}}} - if the generator is wrong
+{{"function_template": {{"python": "...", "java": "...", "cpp": "..."}}}} - if starter code doesn't fit the wrapper
+{{"problem_statement": "..."}} - only to remove an ambiguity
 
 🔴 CRITICAL REMINDERS:
 - Java: Use BufferedReader, NOT Scanner (causes timeouts)
@@ -604,8 +903,8 @@ Return JSON with ONLY the fields that need fixing:
             
             # Deep merge for nested dicts (solution_code, stdin_wrappers)
             # If LLM only fixes one language, preserve the others
-            for key in ["solution_code", "stdin_wrappers"]:
-                if key in llm_response and llm_response[key]:
+            for key in ["solution_code", "stdin_wrappers", "function_template"]:
+                if isinstance(llm_response.get(key), dict) and llm_response[key]:
                     if key not in fixed_variant:
                         fixed_variant[key] = {}
                     # Merge per-language, not replace entire dict
@@ -613,6 +912,15 @@ Return JSON with ONLY the fields that need fixing:
                         if code:  # Only update if provided
                             fixed_variant[key][lang] = code
             
+            # Single-language helper programs, stored as {"python": code}
+            for key in ["brute_force_solution", "test_generator_code"]:
+                code = _python_field(llm_response.get(key))
+                if code:
+                    fixed_variant[key] = {"python": code}
+
+            if isinstance(llm_response.get("problem_statement"), str) and llm_response["problem_statement"].strip():
+                fixed_variant["problem_statement"] = llm_response["problem_statement"]
+
             # For test_cases - ONLY replace if LLM provides at least 10!
             if "test_cases" in llm_response and llm_response["test_cases"]:
                 new_test_count = len(llm_response["test_cases"])
@@ -642,7 +950,11 @@ Return JSON with ONLY the fields that need fixing:
                 return None
             
             # Log what was changed
-            changed = [k for k in ["solution_code", "stdin_wrappers", "test_cases"] if k in llm_response and llm_response[k]]
+            changed = [
+                k for k in ["solution_code", "stdin_wrappers", "function_template", "brute_force_solution",
+                            "test_generator_code", "test_cases", "problem_statement"]
+                if k in llm_response and llm_response[k]
+            ]
             logger.info(f"     LLM fixed fields: {changed}")
             
             return fixed_variant

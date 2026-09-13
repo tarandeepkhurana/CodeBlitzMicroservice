@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     SIMILARITY_THRESHOLD: float = 0.92  # for deduplication
     
     # ═══════════════════════════════════════════════════════════════
+    # Verified Question Pool (matches are served from this stock)
+    # ═══════════════════════════════════════════════════════════════
+    POOL_ENABLED: bool = True
+    POOL_TARGET_PER_DIFFICULTY: int = 5   # keep this many verified variants ready
+    POOL_CHECK_INTERVAL_SECONDS: int = 300  # how often the restock worker looks
+    POOL_MAX_PER_CYCLE: int = 1           # generations per wake-up (cost control)
+
+    # ═══════════════════════════════════════════════════════════════
     # Supported Languages (Python, Java, C++ only)
     # ═══════════════════════════════════════════════════════════════
     @property
